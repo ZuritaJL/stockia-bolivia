@@ -8,10 +8,13 @@ import {
   Crown,
   Keyboard,
   Loader2,
+  MessageSquare,
   Mic,
   MicOff,
+  Radio,
   RotateCcw,
   Send,
+  Trash2,
   Volume2,
   X,
 } from "lucide-react";
@@ -55,9 +58,15 @@ interface SpeechRecognitionInstanceLike {
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionInstanceLike;
 
+interface TurnoHistorialChat {
+  role: "user" | "model";
+  text: string;
+}
+
 interface RespuestaAsistenteVoz {
   ok: boolean;
   estado?: "EJECUTADO" | "LIMITE_ALCANZADO";
+  esperaRespuestaUsuario?: boolean;
   mensajeVoz?: string;
   error?: string;
   operacion?: {
@@ -89,35 +98,56 @@ interface TarjetaResultadoVoz {
 }
 
 const EJEMPLOS_RAPIDOS = [
-  "Aumenta 10 unidades de Coca-Cola 2L",
-  "Crea el producto Galletas Oreo a 5 bolivianos con 10 unidades",
-  "Vendí 2 Yogurt Pil Frutilla",
+  "¿Cuánto tengo de Arroz Grano de Oro?",
+  "Auméntale 20 kilos que vencen en diciembre",
+  "Vendí 2 de la gaseosa negra de dos litros",
 ];
 
-function hablarTextoEspañol(texto: string) {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+/**
+ * Reproduce la respuesta en voz alta con una voz fluida en español latinoamericano
+ * (`rate = 1.05`) y ejecuta `alTerminar` cuando concluye la locución.
+ */
+function hablarTextoLatino(texto: string, alTerminar?: () => void) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    alTerminar?.();
+    return;
+  }
+
   try {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(texto);
-    utterance.lang = "es-BO";
-    utterance.rate = 1.04;
+    utterance.lang = "es-419";
+    utterance.rate = 1.05;
     utterance.pitch = 1.0;
 
     const voces = window.speechSynthesis.getVoices();
-    const vozEspanol =
+    const vozPreferida =
       voces.find((v) => v.lang.toLowerCase().startsWith("es-bo")) ??
       voces.find((v) => v.lang.toLowerCase().startsWith("es-419")) ??
       voces.find((v) => v.lang.toLowerCase().startsWith("es-mx")) ??
+      voces.find((v) => v.lang.toLowerCase().startsWith("es-ar")) ??
+      voces.find((v) => v.lang.toLowerCase().startsWith("es-co")) ??
+      voces.find((v) => v.lang.toLowerCase().startsWith("es-us")) ??
       voces.find((v) => v.lang.toLowerCase().startsWith("es"));
 
-    if (vozEspanol) {
-      utterance.voice = vozEspanol;
-      utterance.lang = vozEspanol.lang;
+    if (vozPreferida) {
+      utterance.voice = vozPreferida;
+      utterance.lang = vozPreferida.lang;
     }
+
+    let callbackDisparado = false;
+    const dispararUnaVez = () => {
+      if (callbackDisparado) return;
+      callbackDisparado = true;
+      alTerminar?.();
+    };
+
+    utterance.onend = dispararUnaVez;
+    utterance.onerror = dispararUnaVez;
 
     window.speechSynthesis.speak(utterance);
   } catch {
-    // Ignorar si el navegador restringe síntesis automática
+    alTerminar?.();
   }
 }
 
@@ -127,6 +157,10 @@ export function VoiceAssistantButton() {
   const [escuchando, setEscuchando] = useState(false);
   const [procesandoIA, setProcesandoIA] = useState(false);
   const [deshaciendo, setDeshaciendo] = useState(false);
+  const [escuchaContinua, setEscuchaContinua] = useState(false);
+
+  // Memoria conversacional multi-turno (últimos 6 intercambios = 12 mensajes)
+  const [historial, setHistorial] = useState<TurnoHistorialChat[]>([]);
 
   const [transcripcionEnVivo, setTranscripcionEnVivo] = useState("");
   const [mostrarCampoTexto, setMostrarCampoTexto] = useState(false);
@@ -138,6 +172,24 @@ export function VoiceAssistantButton() {
   const recognitionRef = useRef<SpeechRecognitionInstanceLike | null>(null);
   const textoAcumuladoRef = useRef("");
   const enviadoEnSesionRef = useRef(false);
+  const historialRef = useRef<TurnoHistorialChat[]>([]);
+  const escuchaContinuaRef = useRef(false);
+  const iniciarEscuchaFnRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    historialRef.current = historial;
+  }, [historial]);
+
+  useEffect(() => {
+    escuchaContinuaRef.current = escuchaContinua;
+  }, [escuchaContinua]);
+
+  // Pre-cargar voces del navegador para evitar retardo en la primera lectura TTS
+  useEffect(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.getVoices();
+    }
+  }, []);
 
   // Temporizador regresivo de 6 segundos para el botón "Deshacer"
   useEffect(() => {
@@ -156,8 +208,18 @@ export function VoiceAssistantButton() {
     return () => window.clearInterval(intervalo);
   }, [tarjeta?.undoToken, segundosDeshacer]);
 
+  const obtenerConstructorReconocimiento =
+    (): SpeechRecognitionConstructor | null => {
+      if (typeof window === "undefined") return null;
+      const win = window as unknown as {
+        SpeechRecognition?: SpeechRecognitionConstructor;
+        webkitSpeechRecognition?: SpeechRecognitionConstructor;
+      };
+      return win.SpeechRecognition ?? win.webkitSpeechRecognition ?? null;
+    };
+
   const enviarComandoAlServidor = useCallback(
-    async (comando: string) => {
+    async (comando: string, vinoDeMicrofono: boolean) => {
       const limpio = comando.trim();
       if (!limpio || procesandoIA) return;
 
@@ -165,6 +227,8 @@ export function VoiceAssistantButton() {
       setTranscripcionEnVivo(limpio);
 
       try {
+        const historialPrevio = historialRef.current.slice(-12);
+
         const res = await fetch("/api/voice-assistant", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -172,6 +236,7 @@ export function VoiceAssistantButton() {
             textoComando: limpio,
             usuarioId: cuota.usuarioId ?? undefined,
             comercioId: cuota.comercioId ?? undefined,
+            historial: historialPrevio,
           }),
         });
 
@@ -189,8 +254,8 @@ export function VoiceAssistantButton() {
         if (data.estado === "LIMITE_ALCANZADO") {
           const msg =
             data.mensajeVoz ??
-            "Alcanzaste tus 15 comandos gratuitos de hoy. Activa el Plan Asistente Voz Pro por Bs 25 al mes.";
-          hablarTextoEspañol(msg);
+            "Agotaste tus 15 comandos gratuitos de hoy. Activa Voz Pro por Bs 25 al mes.";
+          hablarTextoLatino(msg);
           setTarjeta({
             estado: "LIMITE_ALCANZADO",
             comandoDictado: limpio,
@@ -208,7 +273,7 @@ export function VoiceAssistantButton() {
         if (!res.ok || !data.ok) {
           const errTexto =
             data.error ?? "No pude procesar el comando en este momento.";
-          hablarTextoEspañol(errTexto);
+          hablarTextoLatino(errTexto);
           setTarjeta({
             estado: "ERROR",
             comandoDictado: limpio,
@@ -222,8 +287,16 @@ export function VoiceAssistantButton() {
         }
 
         const respuestaHablada =
-          data.mensajeVoz ?? "Operación completada correctamente.";
-        hablarTextoEspañol(respuestaHablada);
+          data.mensajeVoz ?? "Listo, operación completada.";
+
+        // Guardar este intercambio en la memoria conversacional (máximo últimos 6 intercambios = 12 turnos)
+        setHistorial((prev) =>
+          [
+            ...prev,
+            { role: "user" as const, text: limpio },
+            { role: "model" as const, text: respuestaHablada },
+          ].slice(-12)
+        );
 
         if (data.mutoBaseDatos) {
           await sincronizarInventarioLocalDesdeNube(data.cambiosLocales);
@@ -235,17 +308,34 @@ export function VoiceAssistantButton() {
           estado: "EJECUTADO",
           comandoDictado: limpio,
           mensajeVoz: respuestaHablada,
-          titulo: data.operacion?.titulo ?? "Comando ejecutado",
+          titulo: data.operacion?.titulo ?? "Asistente StockIA",
           detalle: data.operacion?.detalle ?? respuestaHablada,
           undoToken: data.undoToken ?? null,
         });
         setSegundosDeshacer(tieneUndo ? 6 : 0);
         setMostrarCampoTexto(false);
         setTextoManual("");
+
+        // Si la respuesta termina en pregunta (?) o está activa la escucha continua,
+        // reabrir el micrófono automáticamente apenas termine de hablar la IA
+        const esPreguntaAclaracion =
+          Boolean(data.esperaRespuestaUsuario) ||
+          respuestaHablada.trim().endsWith("?");
+
+        hablarTextoLatino(respuestaHablada, () => {
+          if (
+            (esPreguntaAclaracion && vinoDeMicrofono) ||
+            escuchaContinuaRef.current
+          ) {
+            window.setTimeout(() => {
+              iniciarEscuchaFnRef.current?.();
+            }, 220);
+          }
+        });
       } catch {
         const msgRed =
-          "El asistente de voz requiere conexión a internet. Usa el mostrador táctil o escáner en modo sin conexión.";
-        hablarTextoEspañol(msgRed);
+          "El asistente de voz requiere señal de internet. Usa el mostrador táctil en modo sin conexión.";
+        hablarTextoLatino(msgRed);
         setTarjeta({
           estado: "ERROR",
           comandoDictado: limpio,
@@ -262,33 +352,18 @@ export function VoiceAssistantButton() {
     [cuota.comercioId, cuota.usuarioId, procesandoIA]
   );
 
-  const obtenerConstructorReconocimiento =
-    (): SpeechRecognitionConstructor | null => {
-      if (typeof window === "undefined") return null;
-      const win = window as unknown as {
-        SpeechRecognition?: SpeechRecognitionConstructor;
-        webkitSpeechRecognition?: SpeechRecognitionConstructor;
-      };
-      return win.SpeechRecognition ?? win.webkitSpeechRecognition ?? null;
-    };
-
-  const alternarEscuchaVoz = () => {
-    if (procesandoIA) return;
-
-    // Si ya está escuchando, detener y procesar lo capturado
-    if (escuchando && recognitionRef.current) {
-      recognitionRef.current.stop();
-      return;
-    }
-
+  const iniciarReconocimientoVoz = useCallback(() => {
     const SpeechConstructor = obtenerConstructorReconocimiento();
     if (!SpeechConstructor) {
-      // Si el navegador de escritorio no soporta Web Speech API, desplegar campo de texto
       setMostrarCampoTexto(true);
       return;
     }
 
     try {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+
       const recognition = new SpeechConstructor();
       recognition.lang = "es-BO";
       recognition.continuous = false;
@@ -298,7 +373,6 @@ export function VoiceAssistantButton() {
       textoAcumuladoRef.current = "";
       enviadoEnSesionRef.current = false;
       setTranscripcionEnVivo("");
-      setTarjeta(null);
 
       recognition.onresult = (event) => {
         let parcial = "";
@@ -325,12 +399,13 @@ export function VoiceAssistantButton() {
         }
       };
 
+      // Auto-envío manos libres al detectar silencio / fin de frase
       recognition.onend = () => {
         setEscuchando(false);
         const dictadoFinal = textoAcumuladoRef.current.trim();
         if (dictadoFinal && !enviadoEnSesionRef.current) {
           enviadoEnSesionRef.current = true;
-          void enviarComandoAlServidor(dictadoFinal);
+          void enviarComandoAlServidor(dictadoFinal, true);
         }
       };
 
@@ -341,6 +416,27 @@ export function VoiceAssistantButton() {
       setEscuchando(false);
       setMostrarCampoTexto(true);
     }
+  }, [enviarComandoAlServidor]);
+
+  useEffect(() => {
+    iniciarEscuchaFnRef.current = iniciarReconocimientoVoz;
+  }, [iniciarReconocimientoVoz]);
+
+  const alternarEscuchaVoz = () => {
+    if (procesandoIA) return;
+
+    if (escuchando && recognitionRef.current) {
+      recognitionRef.current.stop();
+      return;
+    }
+
+    setTarjeta(null);
+    iniciarReconocimientoVoz();
+  };
+
+  const limpiarConversacion = () => {
+    setHistorial([]);
+    setTarjeta(null);
   };
 
   const ejecutarDeshacer = async () => {
@@ -378,8 +474,8 @@ export function VoiceAssistantButton() {
         await sincronizarInventarioLocalDesdeNube();
         notificarMutacionNubeStockia();
 
-        const msgUndo = data.mensajeVoz ?? "Operación revertida correctamente.";
-        hablarTextoEspañol(msgUndo);
+        const msgUndo = data.mensajeVoz ?? "Listo, revertí la última operación.";
+        hablarTextoLatino(msgUndo);
         setTarjeta({
           estado: "REVERTIDO",
           comandoDictado: tarjeta.comandoDictado,
@@ -395,24 +491,64 @@ export function VoiceAssistantButton() {
     }
   };
 
+  const intercambiosEnMemoria = Math.floor(historial.length / 2);
+
   return (
     <>
-      {/* PANEL FLOTANTE EMERGENTE: ESCUCHA EN VIVO / ESCRIBIR COMANDO / RESULTADO + DESHACER 6s */}
+      {/* PANEL FLOTANTE EMERGENTE: MANOS LIBRES / MEMORIA MULTI-TURNO / DESHACER 6s */}
       {(escuchando || procesandoIA || mostrarCampoTexto || tarjeta) && (
         <div className="fixed inset-x-0 bottom-22 z-50 px-4 pointer-events-none">
           <div className="max-w-md mx-auto pointer-events-auto rounded-3xl border-2 border-brand-primary/30 bg-white p-4 shadow-2xl space-y-3">
-            {/* Estado 1: Escuchando por micrófono con animación de ondas sonoras */}
+            {/* Barra superior de contexto conversacional y escucha continua */}
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEscuchaContinua((prev) => !prev)}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-extrabold transition cursor-pointer ${
+                    escuchaContinua
+                      ? "bg-brand-primary text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  <Radio className="h-3 w-3" />
+                  {escuchaContinua ? "Manos libres continuo" : "Auto-envío activo"}
+                </button>
+
+                {intercambiosEnMemoria > 0 && (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500">
+                    <MessageSquare className="h-3 w-3 text-brand-primary" />
+                    {intercambiosEnMemoria}/6 turnos
+                  </span>
+                )}
+              </div>
+
+              {historial.length > 0 && (
+                <button
+                  type="button"
+                  onClick={limpiarConversacion}
+                  title="Limpiar memoria de conversación"
+                  className="inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[10px] font-bold text-slate-500 hover:bg-slate-100 hover:text-red-600 cursor-pointer"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  Limpiar chat
+                </button>
+              )}
+            </div>
+
+            {/* Estado 1: Escuchando en vivo con auto-envío al hacer pausa */}
             {escuchando && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="inline-flex items-center gap-2 text-xs font-extrabold text-brand-amber">
                     <span className="h-2.5 w-2.5 rounded-full bg-brand-amber animate-ping" />
-                    Escuchando en español... (Toca el micrófono para enviar)
+                    Te escucho... habla con naturalidad (se envía solo al pausar)
                   </span>
                   <button
                     type="button"
                     onClick={() => {
                       textoAcumuladoRef.current = "";
+                      setEscuchaContinua(false);
                       recognitionRef.current?.abort();
                       setEscuchando(false);
                     }}
@@ -439,20 +575,20 @@ export function VoiceAssistantButton() {
                 <div className="rounded-2xl bg-slate-50 border border-slate-200 px-3.5 py-2.5 text-sm font-semibold text-slate-800 min-h-11">
                   {transcripcionEnVivo || (
                     <span className="text-slate-400 font-normal">
-                      Ej: &ldquo;Vendí 2 Coca-Cola 2 litros&rdquo; o &ldquo;¿Qué está por vencer?&rdquo;
+                      Ej: &ldquo;¿Cuánto tengo de Arroz Grano de Oro?&rdquo; → &ldquo;Auméntale 20 kilos&rdquo;
                     </span>
                   )}
                 </div>
               </div>
             )}
 
-            {/* Estado 2: Procesando con Gemini Function Calling */}
+            {/* Estado 2: Procesando semántica e inventario con Gemini */}
             {procesandoIA && (
               <div className="flex items-center gap-3 py-2">
                 <Loader2 className="h-6 w-6 animate-spin text-brand-primary shrink-0" />
                 <div className="min-w-0">
                   <p className="text-xs font-extrabold text-brand-primary">
-                    StockIA procesando comando...
+                    Entendiendo tu pedido...
                   </p>
                   <p className="text-xs text-slate-600 truncate">
                     &ldquo;{transcripcionEnVivo}&rdquo;
@@ -467,7 +603,7 @@ export function VoiceAssistantButton() {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-extrabold text-brand-primary flex items-center gap-1.5">
                     <Keyboard className="h-4 w-4 text-brand-amber" />
-                    Escribir comando de voz (Modo PC)
+                    Conversar por texto (con memoria activa)
                   </span>
                   <button
                     type="button"
@@ -482,7 +618,7 @@ export function VoiceAssistantButton() {
                   onSubmit={(e) => {
                     e.preventDefault();
                     if (textoManual.trim()) {
-                      void enviarComandoAlServidor(textoManual);
+                      void enviarComandoAlServidor(textoManual, false);
                     }
                   }}
                   className="flex gap-2"
@@ -491,7 +627,7 @@ export function VoiceAssistantButton() {
                     type="text"
                     value={textoManual}
                     onChange={(e) => setTextoManual(e.target.value)}
-                    placeholder="Ej. Vendí 2 Yogurt Pil Frutilla"
+                    placeholder="Ej. Auméntale 10 más a ese producto"
                     autoFocus
                     className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-brand-primary focus:outline-none"
                   />
@@ -510,7 +646,7 @@ export function VoiceAssistantButton() {
                     <button
                       key={ej}
                       type="button"
-                      onClick={() => void enviarComandoAlServidor(ej)}
+                      onClick={() => void enviarComandoAlServidor(ej, false)}
                       className="rounded-lg bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-brand-primary-tint hover:text-brand-primary cursor-pointer text-left"
                     >
                       &ldquo;{ej}&rdquo;
@@ -520,13 +656,13 @@ export function VoiceAssistantButton() {
               </div>
             )}
 
-            {/* Estado 4: Tarjeta de Respuesta + Síntesis TTS + Botón Deshacer (6s) */}
+            {/* Estado 4: Respuesta natural + TTS + Deshacer (6s) */}
             {tarjeta && !escuchando && !procesandoIA && (
               <div className="space-y-2.5">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-start gap-2.5 min-w-0">
                     {tarjeta.estado === "LIMITE_ALCANZADO" ||
-                      tarjeta.estado === "ERROR" ? (
+                    tarjeta.estado === "ERROR" ? (
                       <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-brand-amber" />
                     ) : (
                       <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-brand-primary" />
@@ -544,7 +680,7 @@ export function VoiceAssistantButton() {
                   <div className="flex items-center gap-1 shrink-0">
                     <button
                       type="button"
-                      onClick={() => hablarTextoEspañol(tarjeta.mensajeVoz)}
+                      onClick={() => hablarTextoLatino(tarjeta.mensajeVoz)}
                       title="Repetir lectura en voz alta"
                       className="rounded-lg p-1.5 text-brand-primary hover:bg-brand-primary-tint cursor-pointer"
                     >
@@ -561,7 +697,6 @@ export function VoiceAssistantButton() {
                   </div>
                 </div>
 
-                {/* Botón "Deshacer" activo durante 6 segundos */}
                 {tarjeta.undoToken && segundosDeshacer > 0 && (
                   <div className="pt-1 flex items-center justify-between gap-3 border-t border-slate-100">
                     <span className="text-[11px] text-slate-500">
@@ -581,7 +716,6 @@ export function VoiceAssistantButton() {
                   </div>
                 )}
 
-                {/* CTA directo si alcanzó el límite diario */}
                 {tarjeta.estado === "LIMITE_ALCANZADO" && (
                   <Link
                     href="/plan"
@@ -609,13 +743,14 @@ export function VoiceAssistantButton() {
             type="button"
             onClick={alternarEscuchaVoz}
             aria-label={
-              escuchando ? "Detener y enviar comando de voz" : "Tocar para hablar"
+              escuchando ? "Detener escucha" : "Tocar para hablar con StockIA"
             }
             title="Tocar para hablar con StockIA"
-            className={`relative -mt-7 flex h-15 w-15 items-center justify-center rounded-full shadow-lg ring-4 ring-brand-primary transition-transform active:scale-95 cursor-pointer ${escuchando
+            className={`relative -mt-7 flex h-15 w-15 items-center justify-center rounded-full shadow-lg ring-4 ring-brand-primary transition-transform active:scale-95 cursor-pointer ${
+              escuchando
                 ? "bg-brand-amber text-white"
                 : "bg-white text-brand-amber hover:bg-brand-amber-tint"
-              }`}
+            }`}
           >
             {procesandoIA ? (
               <Loader2 className="h-7 w-7 animate-spin text-brand-primary" />
@@ -627,7 +762,6 @@ export function VoiceAssistantButton() {
           </button>
         </div>
 
-        {/* Enlace compacto desplegable "Escribir comando" para pruebas en PC */}
         <button
           type="button"
           onClick={() => {

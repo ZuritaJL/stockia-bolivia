@@ -53,7 +53,17 @@ const PALABRAS_GENERICAS_ENVASE = new Set([
   "con",
   "sin",
   "producto",
+  "productos",
+  "ese",
+  "esa",
+  "eso",
+  "mas",
 ]);
+
+export interface TurnoConversacionVoz {
+  role: "user" | "model";
+  text: string;
+}
 
 interface LlamadaHerramientaNormalizada {
   name: string;
@@ -115,7 +125,11 @@ function capitalizarNombreProducto(nombre: string): string {
     .map((palabra) => {
       if (!palabra) return "";
       if (/^\d+(ml|l|kg|g|gr)$/i.test(palabra)) {
-        return palabra.toUpperCase().replace("ML", "ml").replace("KG", "kg").replace("GR", "g");
+        return palabra
+          .toUpperCase()
+          .replace("ML", "ml")
+          .replace("KG", "kg")
+          .replace("GR", "g");
       }
       return palabra.charAt(0).toUpperCase() + palabra.slice(1).toLowerCase();
     })
@@ -138,40 +152,74 @@ function normalizarUnidadMedida(raw: unknown): UnidadMedida {
 
 function inferirCategoriaPorNombre(nombre: string): string {
   const n = normalizarTexto(nombre);
-  if (/\b(coca|soda|refresco|agua|jugo|cerveza|maltin|cascada|fanta|sprite|pepsi)\b/.test(n)) {
+  if (
+    /\b(coca|soda|gaseosa|refresco|agua|jugo|cerveza|maltin|cascada|fanta|sprite|pepsi)\b/.test(
+      n
+    )
+  ) {
     return "Bebidas";
   }
   if (/\b(leche|yogurt|pilfrut|queso|mantequilla|helado|chicolac)\b/.test(n)) {
     return "Lácteos";
   }
-  if (/\b(galleta|galletas|oreo|papas|snack|chocolate|caramelo|dulce|chizito)\b/.test(n)) {
+  if (
+    /\b(galleta|galletas|oreo|papas|snack|chocolate|caramelo|dulce|chizito)\b/.test(
+      n
+    )
+  ) {
     return "Snacks";
   }
   if (/\b(pan|molde|queque|torta|empanada)\b/.test(n)) {
     return "Panadería";
   }
-  if (/\b(detergente|jabon|lavavajillas|cloro|lavandina|papel higienico|shampoo|limpieza)\b/.test(n)) {
+  if (
+    /\b(detergente|jabon|lavavajillas|cloro|lavandina|papel higienico|shampoo|limpieza)\b/.test(
+      n
+    )
+  ) {
     return "Limpieza";
   }
   return "Abarrotes";
 }
 
 /**
- * Busca en CatalogoCurado primero con Prisma `contains` insensible a mayúsculas,
- * y luego verifica coincidencia estricta de todas las palabras distintivas
- * (evitando confundir un producto nuevo como "Galletas Oreo" con "Galletas Mabel's").
+ * Resuelve un producto priorizando `productoId` exacto provisto por Gemini,
+ * seguido de `contains` insensible a mayúsculas y coincidencia de tokens distintivos.
  */
-async function buscarProductoExistentePreciso(
-  nombreBuscado: string,
-  catalogoCache: CatalogoCurado[]
-): Promise<CatalogoCurado | null> {
+async function resolverProductoSemantica(params: {
+  productoId?: string | null;
+  nombreBuscado: string;
+  catalogoCache: CatalogoCurado[];
+  catalogoPorId: Map<string, CatalogoCurado>;
+}): Promise<CatalogoCurado | null> {
+  const { productoId, nombreBuscado, catalogoCache, catalogoPorId } = params;
+
+  if (productoId && catalogoPorId.has(productoId.trim())) {
+    return catalogoPorId.get(productoId.trim()) ?? null;
+  }
+
   const limpio = nombreBuscado.trim();
   if (!limpio) return null;
 
-  // 1. Búsqueda directa en PostgreSQL con `contains` e `insensitive`
+  // Sinónimos coloquiales bolivianos frecuentes para el respaldo determinista
+  const norm = normalizarTexto(limpio);
+  if (/\bgaseosa negra\b|\bsoda negra\b/.test(norm)) {
+    const coca = catalogoCache.find((c) =>
+      normalizarTexto(c.nombreProducto).includes("coca cola")
+    );
+    if (coca) return coca;
+  }
+  if (/\bfideo largo\b|\btallarin\b/.test(norm)) {
+    const fideo = catalogoCache.find((c) =>
+      normalizarTexto(c.nombreProducto).includes("fideo")
+    );
+    if (fideo) return fideo;
+  }
+
   const coincidenciaDirectaDb = await prisma.catalogoCurado.findFirst({
     where: {
       OR: [
+        { id: limpio },
         { codigoBarras: limpio },
         {
           nombreProducto: {
@@ -187,9 +235,7 @@ async function buscarProductoExistentePreciso(
     return coincidenciaDirectaDb;
   }
 
-  // 2. Búsqueda normalizada sin guiones/acentos exigiendo que TODAS las palabras distintivas coincidan
-  const qNorm = normalizarTexto(limpio);
-  const tokensDistintivos = qNorm
+  const tokensDistintivos = norm
     .split(" ")
     .filter(
       (t) =>
@@ -208,7 +254,6 @@ async function buscarProductoExistentePreciso(
     const todosPresentes = tokensDistintivos.every((tok) =>
       textoItem.includes(tok)
     );
-
     if (!todosPresentes) continue;
 
     const puntaje = tokensDistintivos.length * 20;
@@ -221,15 +266,31 @@ async function buscarProductoExistentePreciso(
   return mejorCandidato;
 }
 
-/**
- * Búsqueda flexible para ventas y consultas de stock sobre el catálogo actual.
- */
 function buscarMejorProductoEnCatalogo(
   consulta: string,
-  catalogo: CatalogoCurado[]
+  catalogo: CatalogoCurado[],
+  catalogoPorId?: Map<string, CatalogoCurado>,
+  productoId?: string | null
 ): CatalogoCurado | null {
+  if (productoId && catalogoPorId?.has(productoId.trim())) {
+    return catalogoPorId.get(productoId.trim()) ?? null;
+  }
+
   const qNorm = normalizarTexto(consulta);
   if (!qNorm) return null;
+
+  if (/\bgaseosa negra\b|\bsoda negra\b/.test(qNorm)) {
+    const coca = catalogo.find((c) =>
+      normalizarTexto(c.nombreProducto).includes("coca cola")
+    );
+    if (coca) return coca;
+  }
+  if (/\bfideo largo\b|\btallarin\b/.test(qNorm)) {
+    const fideo = catalogo.find((c) =>
+      normalizarTexto(c.nombreProducto).includes("fideo")
+    );
+    if (fideo) return fideo;
+  }
 
   const tokensConsulta = qNorm
     .split(" ")
@@ -271,8 +332,30 @@ function buscarMejorProductoEnCatalogo(
   return mejorPuntaje >= 12 ? mejor : null;
 }
 
+/**
+ * Extrae el último producto mencionado en el historial conversacional
+ * para resolver pronombres como "auméntale 10 más a ese" en modo respaldo local.
+ */
+function recuperarProductoDeHistorial(
+  historial: TurnoConversacionVoz[],
+  catalogo: CatalogoCurado[]
+): CatalogoCurado | null {
+  for (let i = historial.length - 1; i >= 0; i -= 1) {
+    const textoTurno = normalizarTexto(historial[i].text);
+    for (const item of catalogo) {
+      const nombreNorm = normalizarTexto(item.nombreProducto);
+      if (textoTurno.includes(nombreNorm)) {
+        return item;
+      }
+    }
+    const candidato = buscarMejorProductoEnCatalogo(historial[i].text, catalogo);
+    if (candidato) return candidato;
+  }
+  return null;
+}
+
 // ============================================================================
-// PARSER LOCAL DE RESPALDO EN ESPAÑOL (TOLERANTE A CAÍDA DE NUBE / 503)
+// PARSER LOCAL DE RESPALDO EN ESPAÑOL CON MEMORIA DE HISTORIAL
 // ============================================================================
 
 const NUMEROS_PALABRA: Record<string, number> = {
@@ -393,13 +476,29 @@ function extraerFechaRelativaOExplicita(
     return formatearYYYYMMDD(new Date(anio, mesIdx, dia));
   }
 
+  // Solo mes mencionado: ej. "vencen en diciembre" -> día 28 de ese mes
+  const soloMes = norm.match(
+    /\ben\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\b/
+  );
+  if (soloMes) {
+    const mesIdx = MESES_ES[soloMes[1]];
+    let anio = referencia.getFullYear();
+    const candidata = new Date(anio, mesIdx, 28, 23, 59, 59);
+    if (candidata.getTime() < referencia.getTime()) {
+      anio += 1;
+    }
+    return formatearYYYYMMDD(new Date(anio, mesIdx, 28));
+  }
+
   return undefined;
 }
 
 function extraerPrecioVentaTexto(textoOriginal: string): number | undefined {
   const m = textoOriginal
     .toLowerCase()
-    .match(/(?:a|precio(?:\s+de\s+venta)?)\s+(\d+(?:[.,]\d+)?)\s*(?:bs|bolivianos?)?/i);
+    .match(
+      /(?:a|precio(?:\s+de\s+venta)?)\s+(\d+(?:[.,]\d+)?)\s*(?:bs|bolivianos?)?/i
+    );
   if (!m) return undefined;
   const val = Number(m[1].replace(",", "."));
   return Number.isFinite(val) && val > 0 ? val : undefined;
@@ -408,15 +507,17 @@ function extraerPrecioVentaTexto(textoOriginal: string): number | undefined {
 function interpretarComandoLocalRespaldo(
   textoComando: string,
   catalogo: CatalogoCurado[],
-  ahoraServidor: Date
+  ahoraServidor: Date,
+  historial: TurnoConversacionVoz[]
 ): LlamadaHerramientaNormalizada | null {
   const norm = reemplazarPalabrasNumericas(normalizarTexto(textoComando));
 
-  const esCreacionProducto =
-    /\b(crea|crear|nuevo producto|da de alta)\b/.test(norm);
+  const esCreacionProducto = /\b(crea|crear|nuevo producto|da de alta)\b/.test(
+    norm
+  );
 
   const esIngresoOAumento =
-    /\b(registra|registrar|aumenta|aumentar|agrega|agregar|suma|sumar|ingresa|ingresaron|ingreso|llego|llegaron|anade|recibi|compre|sube|nuevo lote)\b/.test(
+    /\b(registra|registrar|aumenta|aumentale|aumentar|agrega|agregale|agregar|suma|sumale|sumar|ingresa|ingresaron|ingreso|llego|llegaron|anade|recibi|compre|sube|nuevo lote)\b/.test(
       norm
     ) && !/\b(venta|vendi)\b/.test(norm);
 
@@ -440,24 +541,33 @@ function interpretarComandoLocalRespaldo(
     !esIngresoOAumento &&
     !esVentaExplicita &&
     !esPorVencer &&
-    /\b(stock|cuanto|cuantos|cuantas|queda|quedan|tenemos|tengo|hay|disponible|existencia)\b/.test(
+    /\b(stock|cuanto|cuantos|cuantas|queda|quedan|tenemos|tengo|hay|disponible|existencia|acabaron|acabo)\b/.test(
       norm
     );
 
-  // 1. Creación explícita de producto en el catálogo
   if (esCreacionProducto) {
-    const fechaVenc = extraerFechaRelativaOExplicita(textoComando, ahoraServidor);
+    const fechaVenc = extraerFechaRelativaOExplicita(
+      textoComando,
+      ahoraServidor
+    );
     const precioVenta = extraerPrecioVentaTexto(textoComando) ?? 5;
-    const matchUnidades = norm.match(/\bcon\s+(\d+)\s*(?:unidades?|stock)?\b/) ?? norm.match(/\b(\d+)\s+unidades?\b/);
+    const matchUnidades =
+      norm.match(/\bcon\s+(\d+)\s*(?:unidades?|stock)?\b/) ??
+      norm.match(/\b(\d+)\s+unidades?\b/);
     const stockInicial = matchUnidades ? Number(matchUnidades[1]) : 0;
 
     const nombreExtraido = norm
-      .replace(/^\s*(crea|crear)\s+(el\s+|un\s+)?(nuevo\s+)?(producto\s+)?/, "")
+      .replace(
+        /^\s*(crea|crear)\s+(el\s+|un\s+)?(nuevo\s+)?(producto\s+)?/,
+        ""
+      )
       .replace(/\b(a|precio)\s+\d+(?:\s+\d+)?\s*(bs|bolivianos?)?.*$/, "")
       .replace(/\bcon\s+\d+.*$/, "")
       .trim();
 
-    const nombreLimpiado = capitalizarNombreProducto(nombreExtraido || "Producto Nuevo");
+    const nombreLimpiado = capitalizarNombreProducto(
+      nombreExtraido || "Producto Nuevo"
+    );
 
     return {
       name: "crear_producto_catalogo",
@@ -466,40 +576,64 @@ function interpretarComandoLocalRespaldo(
         categoria: inferirCategoriaPorNombre(nombreLimpiado),
         precio_venta: precioVenta,
         stock_inicial: stockInicial,
+        esProductoNuevo: true,
         ...(fechaVenc ? { fecha_vencimiento: fechaVenc } : {}),
       },
     };
   }
 
-  // 2. Ingreso de lote o aumento de stock
   if (esIngresoOAumento) {
     const sinColaFecha = norm
       .replace(/\b(que\s+)?(vence|vencen|vencimiento)\b.*$/, " ")
       .replace(/\b(a|precio)\s+\d+\s*(bs|bolivianos?)\b.*$/, " ");
 
     const matchCant =
-      sinColaFecha.match(/\b(\d+)\s+(?:unidades?\s+(?:de\s+)?)?/) ??
-      sinColaFecha.match(/\ben\s+(\d+)\b/) ??
+      sinColaFecha.match(/\b(\d+)\s+(?:unidades?|kilos?|litros?|paquetes?|cajas?)?\b/) ??
       sinColaFecha.match(/\b(\d+)\b/);
 
     const cantidad = matchCant ? Math.max(1, Number(matchCant[1])) : 1;
-    const fechaVenc = extraerFechaRelativaOExplicita(textoComando, ahoraServidor);
+    const fechaVenc = extraerFechaRelativaOExplicita(
+      textoComando,
+      ahoraServidor
+    );
     const precioVenta = extraerPrecioVentaTexto(textoComando);
 
     const nombreCandidato = sinColaFecha
       .replace(
-        /\b(registra|registrar|aumenta|aumentar|agrega|agregar|suma|sumar|ingresa|ingresaron|ingreso|llego|llegaron|anade|recibi|compre|sube|el|la|los|las|stock|unidades|unidad|de|del|en|lote|nuevo|producto)\b/g,
+        /\b(registra|registrar|aumenta|aumentale|aumentar|agrega|agregale|agregar|suma|sumale|sumar|ingresa|ingresaron|ingreso|llego|llegaron|anade|recibi|compre|sube|el|la|los|las|stock|unidades|unidad|kilos|kilo|litros|litro|de|del|en|a|ese|esa|eso|mas|lote|nuevo|producto)\b/g,
         " "
       )
       .replace(/^\s*\d+\s*/, "")
       .replace(/\s+/g, " ")
       .trim();
 
+    const prodCatalogo =
+      (nombreCandidato
+        ? buscarMejorProductoEnCatalogo(nombreCandidato, catalogo)
+        : null) ?? recuperarProductoDeHistorial(historial, catalogo);
+
+    if (prodCatalogo) {
+      return {
+        name: "registrar_lote_inventario",
+        args: {
+          productoId: prodCatalogo.id,
+          producto_nombre: prodCatalogo.nombreProducto,
+          cantidad,
+          esProductoNuevo: false,
+          ...(precioVenta ? { precio_venta: precioVenta } : {}),
+          ...(fechaVenc ? { fecha_vencimiento: fechaVenc } : {}),
+        },
+      };
+    }
+
     return {
       name: "registrar_lote_inventario",
       args: {
-        producto_nombre: capitalizarNombreProducto(nombreCandidato || textoComando),
+        producto_nombre: capitalizarNombreProducto(
+          nombreCandidato || textoComando
+        ),
         cantidad,
+        esProductoNuevo: true,
         categoria: inferirCategoriaPorNombre(nombreCandidato),
         ...(precioVenta ? { precio_venta: precioVenta } : {}),
         ...(fechaVenc ? { fecha_vencimiento: fechaVenc } : {}),
@@ -507,7 +641,6 @@ function interpretarComandoLocalRespaldo(
     };
   }
 
-  // 3. Consulta por vencer
   if (esPorVencer) {
     const matchDias = norm.match(/\b(\d+)\s+dias?\b/);
     return {
@@ -516,24 +649,25 @@ function interpretarComandoLocalRespaldo(
     };
   }
 
-  // 4. Consulta de stock
   if (esConsultaStock) {
     const limpio = norm
       .replace(
-        /\b(cuanto|cuantos|cuantas|stock|queda|quedan|tenemos|tengo|hay|disponible|unidades|de|del|en|tienda|mi)\b/g,
+        /\b(cuanto|cuantos|cuantas|stock|queda|quedan|tenemos|tengo|hay|disponible|unidades|de|del|en|tienda|mi|se|me|acabaron|acabo|los|las|el|la)\b/g,
         " "
       )
       .trim();
-    const prod = buscarMejorProductoEnCatalogo(limpio || norm, catalogo);
+    const prod =
+      buscarMejorProductoEnCatalogo(limpio || norm, catalogo) ??
+      recuperarProductoDeHistorial(historial, catalogo);
     return {
       name: "consultar_stock",
       args: {
+        ...(prod ? { productoId: prod.id } : {}),
         producto_nombre: prod ? prod.nombreProducto : limpio || textoComando,
       },
     };
   }
 
-  // 5. Registro de venta
   const segmentos = norm
     .replace(
       /^\s*(vendi|vende|vendimos|registra venta de|registra venta|venta de|cobra|cobrar|despacha|se llevo)\s+/,
@@ -541,8 +675,11 @@ function interpretarComandoLocalRespaldo(
     )
     .split(/\s+(?:y|mas|con)\s+|,\s*/);
 
-  const itemsDetectados: Array<{ producto_nombre: string; cantidad: number }> =
-    [];
+  const itemsDetectados: Array<{
+    productoId?: string;
+    producto_nombre: string;
+    cantidad: number;
+  }> = [];
 
   for (const seg of segmentos) {
     const trimSeg = seg.trim();
@@ -557,6 +694,7 @@ function interpretarComandoLocalRespaldo(
     const prod = buscarMejorProductoEnCatalogo(restoProducto, catalogo);
     if (prod) {
       itemsDetectados.push({
+        productoId: prod.id,
         producto_nombre: prod.nombreProducto,
         cantidad,
       });
@@ -702,19 +840,29 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
   {
     name: "registrar_lote_inventario",
     description:
-      'DEBE invocarse siempre que el comerciante diga: "registra", "aumenta", "agrega", "suma", "ingresa", "llegaron", "compré" o "crea el producto" con unidades para el inventario. Sirve tanto para aumentar el stock de un producto existente como para registrar un producto totalmente nuevo (que se creará automáticamente en el catálogo si aún no existe).',
+      'Invócala cuando el comerciante quiera registrar, aumentar, agregar, sumar, ingresar mercadería o reponer stock (ej. "registra", "aumenta", "auméntale diez más a ese", "ingresaron", "compré"). Si el producto coincide semánticamente con uno del inventario proporcionado, envía OBLIGATORIAMENTE su `productoId` exacto y `esProductoNuevo: false`. Solo usa `esProductoNuevo: true` si el artículo claramente NO existe en el catálogo actual.',
     parameters: {
       type: Type.OBJECT,
       properties: {
+        productoId: {
+          type: Type.STRING,
+          description:
+            "ID exacto del producto en el catálogo proporcionado cuando ya existe en la tienda.",
+        },
         producto_nombre: {
           type: Type.STRING,
           description:
-            "Nombre del producto dictado por el comerciante. Si existe uno equivalente en el catálogo usa ese nombre; si es un producto nuevo conserva el nombre dictado (ej. 'Galletas Oreo', 'Jabón Bolívar').",
+            "Nombre oficial del producto en catálogo (o nombre limpio comercial si es un producto nuevo).",
         },
         cantidad: {
           type: Type.NUMBER,
           description:
-            "Cantidad entera de unidades a registrar, sumar o aumentar en el stock.",
+            "Cantidad entera de unidades/kilos/litros a registrar o sumar.",
+        },
+        esProductoNuevo: {
+          type: Type.BOOLEAN,
+          description:
+            "true únicamente si el producto NO existe en el listado de inventario actual y debe crearse desde cero.",
         },
         fecha_vencimiento: {
           type: Type.STRING,
@@ -727,18 +875,17 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
         },
         precio_venta: {
           type: Type.NUMBER,
-          description: "Precio unitario de venta al público en bolivianos (opcional).",
+          description: "Precio unitario de venta en bolivianos (opcional).",
         },
         categoria: {
           type: Type.STRING,
           description:
-            'Categoría del producto (ej. "Bebidas", "Lácteos", "Abarrotes", "Snacks", "Panadería", "Limpieza"). Por defecto "Abarrotes".',
+            'Categoría del producto (ej. "Bebidas", "Lácteos", "Abarrotes", "Snacks", "Panadería", "Limpieza").',
         },
         unidad_medida: {
           type: Type.STRING,
           enum: ["UNIDAD", "PAQUETE", "CAJA", "LITRO", "KILO"],
-          description:
-            'Unidad de medida del producto. Por defecto "UNIDAD".',
+          description: 'Unidad de medida (por defecto "UNIDAD").',
         },
       },
       required: ["producto_nombre", "cantidad"],
@@ -747,7 +894,7 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
   {
     name: "crear_producto_catalogo",
     description:
-      'Da de alta un producto nuevo en el catálogo de la tienda indicando su precio de venta y opcionalmente un stock inicial (ej. "Crea el producto Galletas Oreo a 5 bolivianos con 10 unidades" o "Crea el producto Fósforos Patria a 2 bolivianos").',
+      'Crea un producto totalmente nuevo en el catálogo cuando NO existe en el inventario actual e incluye su precio de venta (ej. "Crea el producto Galletas Oreo a 5 bolivianos con 10 unidades").',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -758,7 +905,7 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
         categoria: {
           type: Type.STRING,
           description:
-            'Categoría inferida del producto (ej. "Snacks", "Bebidas", "Lácteos", "Abarrotes", "Limpieza").',
+            'Categoría inferida ("Snacks", "Bebidas", "Lácteos", "Abarrotes", "Panadería", "Limpieza").',
         },
         precio_venta: {
           type: Type.NUMBER,
@@ -766,13 +913,11 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
         },
         stock_inicial: {
           type: Type.NUMBER,
-          description:
-            "Unidades iniciales en stock (opcional, 0 si no se menciona cantidad).",
+          description: "Unidades iniciales en stock (0 si no se menciona).",
         },
         fecha_vencimiento: {
           type: Type.STRING,
-          description:
-            "Fecha de vencimiento opcional en formato YYYY-MM-DD.",
+          description: "Fecha de vencimiento opcional YYYY-MM-DD.",
         },
         unidad_medida: {
           type: Type.STRING,
@@ -786,7 +931,7 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
   {
     name: "registrar_venta_voz",
     description:
-      'Registra una venta en mostrador cuando el comerciante dice "vendí", "cobra", "despacha" o "se llevó", descontando stock automáticamente bajo regla FEFO.',
+      'Registra una venta en mostrador descontando stock bajo regla FEFO cuando el comerciante diga "vendí", "cobra", "despacha", "se llevó", etc. Incluye siempre el `productoId` exacto del catálogo.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -796,13 +941,17 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
           items: {
             type: Type.OBJECT,
             properties: {
+              productoId: {
+                type: Type.STRING,
+                description: "ID exacto del producto en el catálogo.",
+              },
               producto_nombre: {
                 type: Type.STRING,
                 description: "Nombre del producto vendido.",
               },
               cantidad: {
                 type: Type.NUMBER,
-                description: "Cantidad entera vendida de ese producto.",
+                description: "Cantidad entera vendida.",
               },
             },
             required: ["producto_nombre", "cantidad"],
@@ -815,10 +964,14 @@ const DECLARACIONES_HERRAMIENTAS: FunctionDeclaration[] = [
   {
     name: "consultar_stock",
     description:
-      "Consulta cuántas unidades disponibles quedan de un producto específico (solo para preguntas de consulta, NO para aumentar o sumar stock).",
+      'Consulta existencias o estado de un producto cuando el comerciante pregunte "¿cuánto tengo?", "¿quedan?", "se me acabaron los...", etc. Envía el `productoId` exacto.',
     parameters: {
       type: Type.OBJECT,
       properties: {
+        productoId: {
+          type: Type.STRING,
+          description: "ID exacto del producto en el catálogo.",
+        },
         producto_nombre: {
           type: Type.STRING,
           description: "Nombre del producto a consultar.",
@@ -916,6 +1069,7 @@ export async function POST(request: Request) {
       textoComando?: string;
       usuarioId?: string;
       comercioId?: string;
+      historial?: TurnoConversacionVoz[];
     };
 
     const textoComando = (body.textoComando ?? "").trim();
@@ -925,6 +1079,23 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+
+    // Sanitizar memoria conversacional (últimos 6 intercambios = 12 mensajes máx.)
+    const historialLimpio: TurnoConversacionVoz[] = Array.isArray(body.historial)
+      ? body.historial
+          .filter(
+            (h) =>
+              h &&
+              (h.role === "user" || h.role === "model") &&
+              typeof h.text === "string" &&
+              h.text.trim().length > 0
+          )
+          .slice(-12)
+          .map((h) => ({
+            role: h.role,
+            text: h.text.trim(),
+          }))
+      : [];
 
     const contexto = await resolverUsuarioYComercio(
       body.usuarioId,
@@ -942,21 +1113,30 @@ export async function POST(request: Request) {
 
     const { usuario, comercio } = contexto;
 
+    // Verificar si este mensaje responde a una pregunta de aclaración previa de la IA
+    const ultimoTurnoModelo = [...historialLimpio]
+      .reverse()
+      .find((h) => h.role === "model");
+    const esRespuestaAAclaracion = Boolean(
+      ultimoTurnoModelo?.text.trim().endsWith("?")
+    );
+
     // 1. Control de Cuota Freemium
     if (
       usuario.plan === PlanSuscripcion.BASICO_GRATIS &&
-      usuario.comandosVozHoy >= LIMITE_GRATIS_DIARIO
+      usuario.comandosVozHoy >= LIMITE_GRATIS_DIARIO &&
+      !esRespuestaAAclaracion
     ) {
       return NextResponse.json({
         ok: false,
         estado: "LIMITE_ALCANZADO",
         mensajeVoz:
-          "Agotaste tus 15 comandos de voz gratuitos de hoy. Activa el Plan Asistente Voz Pro por 25 bolivianos al mes para usar comandos de voz ilimitados.",
+          "Agotaste tus 15 comandos gratuitos de hoy. Activa Voz Pro por 25 bolivianos al mes para hablar sin límites.",
         operacion: {
           tipo: "LIMITE_ALCANZADO",
           titulo: "Límite diario gratuito alcanzado (15/15)",
           detalle:
-            "Pásate al Plan Asistente Voz Pro (Bs 25/mes) en la pestaña Mi Plan para operar sin límites.",
+            "Pásate al Plan Asistente Voz Pro (Bs 25/mes) en Mi Plan para operar sin límites.",
         },
         cuota: {
           plan: usuario.plan,
@@ -967,10 +1147,12 @@ export async function POST(request: Request) {
       });
     }
 
-    const usuarioConCuota = await prisma.usuario.update({
-      where: { id: usuario.id },
-      data: { comandosVozHoy: { increment: 1 } },
-    });
+    const usuarioConCuota = esRespuestaAAclaracion
+      ? usuario
+      : await prisma.usuario.update({
+          where: { id: usuario.id },
+          data: { comandosVozHoy: { increment: 1 } },
+        });
 
     const cuotaActual = {
       plan: usuarioConCuota.plan,
@@ -982,12 +1164,52 @@ export async function POST(request: Request) {
           : Math.max(0, LIMITE_GRATIS_DIARIO - usuarioConCuota.comandosVozHoy),
     };
 
-    const catalogo = await prisma.catalogoCurado.findMany({
-      orderBy: { nombreProducto: "asc" },
-    });
-    const nombresCatalogo = catalogo.map((c) => c.nombreProducto).join(", ");
+    // Consultar contexto real del catálogo e inventario actual del comercio
+    const [catalogo, lotesComercio] = await Promise.all([
+      prisma.catalogoCurado.findMany({
+        orderBy: { nombreProducto: "asc" },
+      }),
+      prisma.inventarioLote.findMany({
+        where: { comercioId: comercio.id },
+        orderBy: [{ fechaVencimiento: "asc" }, { fechaIngreso: "desc" }],
+      }),
+    ]);
 
+    const catalogoPorId = new Map(catalogo.map((c) => [c.id, c]));
     const ahoraServidor = new Date();
+
+    // Construir listado compacto con ID, nombre, marca, categoría, stockTotal y precioVenta
+    const resumenPorProducto = new Map<
+      string,
+      { stockTotal: number; precioVenta: number }
+    >();
+
+    for (const lote of lotesComercio) {
+      const estadoVig = calcularEstadoLoteServidor(
+        lote.stockActual,
+        lote.fechaVencimiento,
+        ahoraServidor
+      );
+      const actual = resumenPorProducto.get(lote.productoId) ?? {
+        stockTotal: 0,
+        precioVenta: Number(lote.precioVenta),
+      };
+      if (lote.stockActual > 0 && estadoVig !== EstadoLote.VENCIDO) {
+        actual.stockTotal += lote.stockActual;
+        actual.precioVenta = Number(lote.precioVenta);
+      }
+      resumenPorProducto.set(lote.productoId, actual);
+    }
+
+    const contextoInventarioReal = catalogo
+      .map((c) => {
+        const info = resumenPorProducto.get(c.id);
+        const stock = info?.stockTotal ?? 0;
+        const precio = info ? `Bs ${info.precioVenta.toFixed(2)}` : "s/p";
+        return `[id:${c.id}] ${c.nombreProducto} | Marca:${c.marca} | Cat:${c.categoria} | Stock:${stock} ${c.unidadMedida.toLowerCase()} | ${precio}`;
+      })
+      .join("\n");
+
     const fechaIsoServidor = formatearYYYYMMDD(ahoraServidor);
     const fechaHumanaServidor = ahoraServidor.toLocaleDateString("es-BO", {
       weekday: "long",
@@ -996,20 +1218,36 @@ export async function POST(request: Request) {
       day: "numeric",
     });
 
-    const systemInstruction = `Eres StockIA, el asistente operativo de voz para tiendas minoristas en La Paz y El Alto, Bolivia.
-Fecha actual exacta del servidor: ${fechaIsoServidor} (${fechaHumanaServidor}).
-Convierte siempre fechas relativas ("mañana", "en dos semanas", "el 11 de febrero") a YYYY-MM-DD tomando como referencia ${fechaIsoServidor}.
-Catálogo actual en tienda: ${nombresCatalogo}.
-REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
-1. Cuando el comerciante diga "registra", "aumenta", "agrega", "suma", "ingresa", "llegaron" o "compré" unidades de un producto (exista o NO en el catálogo), invoca SIEMPRE \`registrar_lote_inventario\`. Si el producto no está en la lista del catálogo, envía su nombre comercial limpio (ej. "Galletas Oreo") junto con \`categoria\` y \`unidad_medida\` inferidas: el servidor lo creará automáticamente.
-2. Cuando el comerciante pida explícitamente dar de alta o crear un producto indicando precio de venta (ej. "Crea el producto Galletas Oreo a 5 bolivianos con 10 unidades"), invoca \`crear_producto_catalogo\` o \`registrar_lote_inventario\`.
-3. Cuando diga "vendí", "cobra", "despacha" o "se llevó", invoca \`registrar_venta_voz\`.
-4. Usa \`consultar_stock\` ÚNICAMENTE para preguntas de consulta ("¿cuánto hay?", "¿cuántas quedan?"), jamás cuando pidan aumentar o agregar stock.`;
+    const systemInstruction = `Eres StockIA, asistente de mostrador ágil, cercano y preciso para "${comercio.nombreTienda}" en ${comercio.macrodistrito}, Bolivia.
+Fecha actual del servidor: ${fechaIsoServidor} (${fechaHumanaServidor}). Convierte fechas relativas ("mañana", "en dos semanas", "en diciembre", "el 11 de febrero") a YYYY-MM-DD tomando ${fechaIsoServidor} como base.
 
-    // 2. Cascada de modelos Gemini (2.5-flash -> 500ms -> 2.5-flash-lite -> 500ms -> 2.0-flash)
+INVENTARIO Y CATÁLOGO REAL DE LA TIENDA:
+${contextoInventarioReal}
+
+REGLAS DE RAZONAMIENTO SEMÁNTICO Y CONVERSACIONAL:
+1. Interpreta con naturalidad jerga boliviana, abreviaciones, plurales, descripciones indirectas y referencias a turnos previos del chat (ej. "la gaseosa negra de dos litros" = Coca-Cola 2L; "fideo largo" = Fideo Lazaroni; "auméntale diez más a ese" = usa el producto del turno previo; "se me acabaron los pilfrut" = consulta o alerta de stock de Pilfrut).
+2. Si el producto mencionado coincide semánticamente con uno del inventario listado arriba, envía OBLIGATORIAMENTE su \`productoId\` exacto (el valor tras \`id:\`) en las herramientas (\`registrar_lote_inventario\`, \`registrar_venta_voz\`, \`consultar_stock\`) y \`esProductoNuevo: false\`.
+3. AMBIGÜEDAD REAL: Si el comerciante pide una operación pero hay dos o más productos muy parecidos en el catálogo (ej. dos sabores o presentaciones distintas y solo dijo la marca general) y el historial reciente no lo aclara, NO adivines ni crees un producto duplicado ni llames herramientas todavía: responde con una sola pregunta corta y amable terminada en "?" para confirmar cuál es (ej. "¿Cuál quieres registrar, Leche Pil Natural o Chicolac Pil?").
+4. Solo crea un producto nuevo (\`esProductoNuevo: true\` o \`crear_producto_catalogo\`) cuando el artículo mencionado claramente NO exista en el inventario listado arriba.
+5. TONO DE VOZ: Responde como un asistente de tienda boliviano ágil y cálido en MÁXIMO 2 oraciones cortas, sin tecnicismos ni listas largas.`;
+
+    // Construir contents multi-turno combinando historial de sesión + comando actual
+    const contentsConversacion = [
+      ...historialLimpio.map((turno) => ({
+        role: turno.role,
+        parts: [{ text: turno.text }],
+      })),
+      {
+        role: "user" as const,
+        parts: [{ text: textoComando }],
+      },
+    ];
+
+    // 2. Cascada tolerante a fallos: gemini-2.5-flash -> 500ms -> gemini-2.5-flash-lite -> 500ms -> gemini-2.0-flash
     let llamadasNormalizadas: LlamadaHerramientaNormalizada[] = [];
     let textoConversacionalDirecto: string | null = null;
     let motorUtilizado = "parser-local-respaldo";
+    let geminiRespondioExitosamente = false;
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
@@ -1020,11 +1258,11 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
         try {
           const respuestaGemini = await ai.models.generateContent({
             model: modeloCandidato,
-            contents: textoComando,
+            contents: contentsConversacion,
             config: {
               systemInstruction,
               tools: [{ functionDeclarations: DECLARACIONES_HERRAMIENTAS }],
-              temperature: 0.1,
+              temperature: 0.15,
             },
           });
 
@@ -1041,6 +1279,7 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
           }
 
           motorUtilizado = modeloCandidato;
+          geminiRespondioExitosamente = true;
           break;
         } catch (errModelo) {
           console.warn(
@@ -1061,44 +1300,53 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
       }
     }
 
-    // 3. Respaldo local en español (también si Gemini contestó texto plano en vez de invocar función ante un comando claro)
+    // 3. Si Gemini hizo una pregunta de desambiguación o respuesta conversacional deliberada, respetarla
     if (llamadasNormalizadas.length === 0) {
-      const interpretacionLocal = interpretarComandoLocalRespaldo(
-        textoComando,
-        catalogo,
-        ahoraServidor
-      );
-      if (interpretacionLocal) {
-        llamadasNormalizadas = [interpretacionLocal];
-        if (!apiKey) {
-          motorUtilizado = "parser-local-respaldo";
-        }
-      } else if (textoConversacionalDirecto) {
+      if (geminiRespondioExitosamente && textoConversacionalDirecto) {
+        const esPreguntaAclaracion = textoConversacionalDirecto
+          .trim()
+          .endsWith("?");
         return NextResponse.json({
           ok: true,
           estado: "EJECUTADO",
           motor: motorUtilizado,
+          esperaRespuestaUsuario: esPreguntaAclaracion,
           mensajeVoz: textoConversacionalDirecto,
           operacion: {
-            tipo: "CONVERSACION",
-            titulo: "Asistente StockIA",
+            tipo: esPreguntaAclaracion ? "ACLARACION" : "CONVERSACION",
+            titulo: esPreguntaAclaracion
+              ? "¿Me confirmas el producto?"
+              : "Asistente StockIA",
             detalle: textoConversacionalDirecto,
           },
           undoToken: null,
           mutoBaseDatos: false,
           cuota: cuotaActual,
         });
+      }
+
+      // Respaldo local determinista si todos los modelos de la nube fallaron
+      const interpretacionLocal = interpretarComandoLocalRespaldo(
+        textoComando,
+        catalogo,
+        ahoraServidor,
+        historialLimpio
+      );
+      if (interpretacionLocal) {
+        llamadasNormalizadas = [interpretacionLocal];
+        motorUtilizado = "parser-local-respaldo";
       } else {
         const guia =
-          "Te escucho. Puedes decir: aumenta 10 Coca-Cola 2L, crea el producto Galletas Oreo a 5 bolivianos con 10 unidades, o vendí 2 Yogurt Pil.";
+          "Te escucho. Dime por ejemplo: vendí 2 Coca-Cola, cuánto tengo de Arroz Grano de Oro o aumenta 10 unidades.";
         return NextResponse.json({
           ok: true,
           estado: "EJECUTADO",
           motor: motorUtilizado,
+          esperaRespuestaUsuario: false,
           mensajeVoz: guia,
           operacion: {
             tipo: "CONVERSACION",
-            titulo: "Asistente Operativo StockIA",
+            titulo: "Asistente StockIA",
             detalle: guia,
           },
           undoToken: null,
@@ -1108,11 +1356,15 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
       }
     }
 
-    // 4. Ejecución transaccional en PostgreSQL + carga de deltas instantáneos para Dexie.js
+    // 4. Ejecución transaccional en PostgreSQL + deltas instantáneos para Dexie.js
     let ultimoUndoToken: string | null = null;
     let mutoBaseDatos = false;
-    const productosActualizadosCliente: Array<ReturnType<typeof serializarProductoCliente>> = [];
-    const lotesActualizadosCliente: Array<ReturnType<typeof serializarLoteCliente>> = [];
+    const productosActualizadosCliente: Array<
+      ReturnType<typeof serializarProductoCliente>
+    > = [];
+    const lotesActualizadosCliente: Array<
+      ReturnType<typeof serializarLoteCliente>
+    > = [];
 
     let resumenOperacion = {
       tipo: "CONSULTA",
@@ -1125,20 +1377,25 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
       const args = paso.args;
 
       // ----------------------------------------------------------------------
-      // FUNCIÓN 1 y 3: registrar_lote_inventario / crear_producto_catalogo
+      // FUNCIÓN 1 y 2: registrar_lote_inventario / crear_producto_catalogo
       // ----------------------------------------------------------------------
       if (
         paso.name === "registrar_lote_inventario" ||
         paso.name === "crear_producto_catalogo"
       ) {
         const esAltaDedicada = paso.name === "crear_producto_catalogo";
+        const productoIdArg = args.productoId
+          ? String(args.productoId).trim()
+          : null;
         const nombreRaw = String(args.producto_nombre ?? "").trim();
+        const esNuevoExplicito =
+          esAltaDedicada || Boolean(args.esProductoNuevo);
 
-        if (!nombreRaw) {
-          mensajeFinalVoz = "Indícame por favor el nombre del producto.";
+        if (!nombreRaw && !productoIdArg) {
+          mensajeFinalVoz = "¿De qué producto quieres registrar las unidades?";
           resumenOperacion = {
-            tipo: "ERROR",
-            titulo: "Nombre requerido",
+            tipo: "ACLARACION",
+            titulo: "Confirma el producto",
             detalle: mensajeFinalVoz,
           };
           continue;
@@ -1162,33 +1419,52 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
             : inferirCategoriaPorNombre(nombreRaw);
         const unidadMedida = normalizarUnidadMedida(args.unidad_medida);
 
-        // Buscar primero en CatalogoCurado (`contains` + `insensitive` y coincidencia precisa)
-        let producto = await buscarProductoExistentePreciso(nombreRaw, catalogo);
+        let producto = await resolverProductoSemantica({
+          productoId: productoIdArg,
+          nombreBuscado: nombreRaw,
+          catalogoCache: catalogo,
+          catalogoPorId,
+        });
+
         let fueProductoNuevo = false;
 
         if (!producto) {
-          const nombreCapitalizado = capitalizarNombreProducto(nombreRaw);
-          const codigoInterno = `INT-${Date.now()}${Math.floor(Math.random() * 10)}`;
-          const primeraPalabraMarca =
-            nombreCapitalizado.split(" ").find((w) => w.length > 2) ?? "Local";
+          if (!esNuevoExplicito && geminiRespondioExitosamente) {
+            // Intento secundario flexible antes de crear para no duplicar accidentalmente
+            producto = buscarMejorProductoEnCatalogo(
+              nombreRaw,
+              catalogo,
+              catalogoPorId,
+              productoIdArg
+            );
+          }
 
-          producto = await prisma.catalogoCurado.create({
-            data: {
-              codigoBarras: codigoInterno,
-              nombreProducto: nombreCapitalizado,
-              marca: primeraPalabraMarca,
-              categoria: categoriaInferida,
-              unidadMedida,
-            },
-          });
+          if (!producto) {
+            const nombreCapitalizado = capitalizarNombreProducto(
+              nombreRaw || "Producto Nuevo"
+            );
+            const codigoInterno = `INT-${Date.now()}${Math.floor(Math.random() * 10)}`;
+            const primeraPalabraMarca =
+              nombreCapitalizado.split(" ").find((w) => w.length > 2) ?? "Local";
 
-          catalogo.push(producto);
-          fueProductoNuevo = true;
+            producto = await prisma.catalogoCurado.create({
+              data: {
+                codigoBarras: codigoInterno,
+                nombreProducto: nombreCapitalizado,
+                marca: primeraPalabraMarca,
+                categoria: categoriaInferida,
+                unidadMedida,
+              },
+            });
+
+            catalogo.push(producto);
+            catalogoPorId.set(producto.id, producto);
+            fueProductoNuevo = true;
+          }
         }
 
         productosActualizadosCliente.push(serializarProductoCliente(producto));
 
-        // Calcular precios tomando argumentos o heredando del último lote del producto
         const lotePrevio = await prisma.inventarioLote.findFirst({
           where: { comercioId: comercio.id, productoId: producto.id },
           orderBy: { fechaIngreso: "desc" },
@@ -1213,9 +1489,7 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
             ? Number(lotePrevio.precioCompra)
             : Number((precioVentaNum * 0.78).toFixed(2)));
 
-        // Si el producto YA existía, verificar si tiene un lote activo con la misma fecha de vencimiento
-        // (o si no se dictó fecha de vencimiento, reutilizar su lote activo más reciente para incrementar stock)
-        let lotecoincidente: InventarioLote | null = null;
+        let loteCoincidente: InventarioLote | null = null;
         if (!fueProductoNuevo && cantidad > 0) {
           const lotesActivosProd = await prisma.inventarioLote.findMany({
             where: {
@@ -1227,14 +1501,14 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
           });
 
           if (fechaVencDate) {
-            lotecoincidente =
+            loteCoincidente =
               lotesActivosProd.find(
                 (l) =>
                   l.fechaVencimiento &&
                   esMismoDiaLocal(l.fechaVencimiento, fechaVencDate)
               ) ?? null;
           } else {
-            lotecoincidente =
+            loteCoincidente =
               lotesActivosProd.find((l) => l.fechaVencimiento === null) ??
               lotesActivosProd[0] ??
               null;
@@ -1243,16 +1517,16 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
         let loteResultado: InventarioLote;
 
-        if (lotecoincidente && cantidad > 0) {
-          const nuevoStock = lotecoincidente.stockActual + cantidad;
+        if (loteCoincidente && cantidad > 0) {
+          const nuevoStock = loteCoincidente.stockActual + cantidad;
           const nuevoEstado = calcularEstadoLoteServidor(
             nuevoStock,
-            lotecoincidente.fechaVencimiento,
+            loteCoincidente.fechaVencimiento,
             ahoraServidor
           );
 
           loteResultado = await prisma.inventarioLote.update({
-            where: { id: lotecoincidente.id },
+            where: { id: loteCoincidente.id },
             data: {
               stockActual: nuevoStock,
               ...(precioVentaExplicito
@@ -1275,18 +1549,20 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
           ultimoUndoToken = guardarOperacionDeshacer({
             usuarioId: usuario.id,
-            descontoCuota: usuario.plan === PlanSuscripcion.BASICO_GRATIS,
+            descontoCuota:
+              usuario.plan === PlanSuscripcion.BASICO_GRATIS &&
+              !esRespuestaAAclaracion,
             tipo: "INCREMENTO_LOTE",
             loteId: loteResultado.id,
             cantidadSumada: cantidad,
-            descripcion: `Aumento de +${cantidad} u. en ${producto.nombreProducto}`,
+            descripcion: `Aumento de +${cantidad} en ${producto.nombreProducto}`,
           });
 
-          mensajeFinalVoz = `Listo, sumé ${cantidad} unidades a ${producto.nombreProducto}. Ahora tienes ${loteResultado.stockActual} en ese lote.`;
+          mensajeFinalVoz = `Listo, sumé ${cantidad} a ${producto.nombreProducto}. Ahora tienes ${loteResultado.stockActual} disponibles.`;
           resumenOperacion = {
             tipo: "INCREMENTO_STOCK",
             titulo: `Stock aumentado: +${cantidad} ${producto.nombreProducto}`,
-            detalle: `Nuevo stock del lote: ${loteResultado.stockActual} u. · Bs ${Number(loteResultado.precioVenta).toFixed(2)}`,
+            detalle: `Total en lote: ${loteResultado.stockActual} · Bs ${Number(loteResultado.precioVenta).toFixed(2)}`,
           };
         } else {
           const estadoInicial = calcularEstadoLoteServidor(
@@ -1308,12 +1584,14 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
           });
 
           const textoVenc = fechaVencDate
-            ? ` que vencen el ${formatearFechaCortaEs(fechaVencDate)}`
+            ? ` con vencimiento el ${formatearFechaCortaEs(fechaVencDate)}`
             : "";
 
           ultimoUndoToken = guardarOperacionDeshacer({
             usuarioId: usuario.id,
-            descontoCuota: usuario.plan === PlanSuscripcion.BASICO_GRATIS,
+            descontoCuota:
+              usuario.plan === PlanSuscripcion.BASICO_GRATIS &&
+              !esRespuestaAAclaracion,
             tipo: "INGRESO_LOTE",
             loteId: loteResultado.id,
             productoCreadoId: fueProductoNuevo ? producto.id : null,
@@ -1325,19 +1603,19 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
           if (fueProductoNuevo) {
             mensajeFinalVoz =
               cantidad > 0
-                ? `Listo, creé el producto ${producto.nombreProducto} a ${precioVentaNum.toFixed(2)} bolivianos con ${cantidad} unidades iniciales${textoVenc}.`
-                : `Listo, creé el producto ${producto.nombreProducto} en ${producto.categoria} a ${precioVentaNum.toFixed(2)} bolivianos.`;
+                ? `Listo, creé ${producto.nombreProducto} a ${precioVentaNum.toFixed(2)} bolivianos con ${cantidad} unidades${textoVenc}.`
+                : `Listo, registré el nuevo producto ${producto.nombreProducto} a ${precioVentaNum.toFixed(2)} bolivianos.`;
             resumenOperacion = {
               tipo: "NUEVO_PRODUCTO",
               titulo: `Nuevo producto: ${producto.nombreProducto}`,
-              detalle: `Código ${producto.codigoBarras} · Stock: ${cantidad} u. · Bs ${precioVentaNum.toFixed(2)}`,
+              detalle: `Stock: ${cantidad} u. · Bs ${precioVentaNum.toFixed(2)}${textoVenc}`,
             };
           } else {
-            mensajeFinalVoz = `Listo, registré un lote de ${cantidad} unidades de ${producto.nombreProducto}${textoVenc}.`;
+            mensajeFinalVoz = `Listo, ingresé ${cantidad} de ${producto.nombreProducto}${textoVenc}.`;
             resumenOperacion = {
               tipo: "INGRESO_LOTE",
               titulo: `Ingreso: +${cantidad} ${producto.nombreProducto}`,
-              detalle: `Precio venta Bs ${precioVentaNum.toFixed(2)}${textoVenc}`,
+              detalle: `Precio Bs ${precioVentaNum.toFixed(2)}${textoVenc}`,
             };
           }
         }
@@ -1349,15 +1627,15 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
       }
 
       // ----------------------------------------------------------------------
-      // FUNCIÓN 2: registrar_venta_voz (Regla FEFO estricta)
+      // FUNCIÓN 3: registrar_venta_voz (Regla FEFO estricta)
       // ----------------------------------------------------------------------
       else if (paso.name === "registrar_venta_voz") {
         const itemsRaw = Array.isArray(args.items) ? args.items : [];
         if (itemsRaw.length === 0) {
-          mensajeFinalVoz = "No pude identificar los productos de la venta.";
+          mensajeFinalVoz = "¿Qué producto y cuántas unidades vendiste?";
           resumenOperacion = {
-            tipo: "ERROR",
-            titulo: "Productos no identificados",
+            tipo: "ACLARACION",
+            titulo: "Confirma la venta",
             detalle: mensajeFinalVoz,
           };
         } else {
@@ -1383,6 +1661,9 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
               for (const raw of itemsRaw) {
                 const obj = raw as Record<string, unknown>;
+                const idBuscado = obj.productoId
+                  ? String(obj.productoId)
+                  : null;
                 const nombreBuscado = String(obj.producto_nombre ?? "");
                 const cantSolicitada = Math.max(
                   1,
@@ -1391,11 +1672,13 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
                 const prod = buscarMejorProductoEnCatalogo(
                   nombreBuscado,
-                  catalogo
+                  catalogo,
+                  catalogoPorId,
+                  idBuscado
                 );
                 if (!prod) {
                   throw new Error(
-                    `No encontré "${nombreBuscado}" en el catálogo de la tienda.`
+                    `No encontré "${nombreBuscado}" en tu inventario.`
                   );
                 }
 
@@ -1435,7 +1718,7 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
                 if (disponibleTotal < cantSolicitada) {
                   throw new Error(
-                    `Stock insuficiente de ${prod.nombreProducto}: pediste ${cantSolicitada} y quedan ${disponibleTotal} unidades.`
+                    `Solo te quedan ${disponibleTotal} de ${prod.nombreProducto} y pediste vender ${cantSolicitada}.`
                   );
                 }
 
@@ -1526,28 +1809,30 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
             ultimoUndoToken = guardarOperacionDeshacer({
               usuarioId: usuario.id,
-              descontoCuota: usuario.plan === PlanSuscripcion.BASICO_GRATIS,
+              descontoCuota:
+                usuario.plan === PlanSuscripcion.BASICO_GRATIS &&
+                !esRespuestaAAclaracion,
               tipo: "VENTA",
               ventaId: txResult.ventaId,
               restauracionesLotes: txResult.restauracionesLotes,
               descripcion: `Venta de ${listaTexto} (Bs ${txResult.totalVenta.toFixed(2)})`,
             });
 
-            mensajeFinalVoz = `Listo, cobré ${listaTexto}. Total ${txResult.totalVenta.toFixed(2)} bolivianos, descontando primero el lote más próximo a vencer.`;
+            mensajeFinalVoz = `Anote la venta de ${listaTexto}. Son ${txResult.totalVenta.toFixed(2)} bolivianos.`;
             resumenOperacion = {
               tipo: "VENTA_VOZ",
               titulo: `Venta cobrada: Bs ${txResult.totalVenta.toFixed(2)}`,
-              detalle: `${listaTexto} · Despacho FEFO (${motorUtilizado})`,
+              detalle: `${listaTexto} · Despacho FEFO aplicado`,
             };
           } catch (errVenta) {
             const msgErr =
               errVenta instanceof Error
                 ? errVenta.message
-                : "No se pudo completar la venta por voz.";
+                : "No se pudo completar la venta.";
             mensajeFinalVoz = msgErr;
             resumenOperacion = {
               tipo: "ERROR",
-              titulo: "No se pudo registrar la venta",
+              titulo: "Stock insuficiente o error",
               detalle: msgErr,
             };
           }
@@ -1558,14 +1843,20 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
       // FUNCIÓN 4: consultar_stock
       // ----------------------------------------------------------------------
       else if (paso.name === "consultar_stock") {
+        const prodId = args.productoId ? String(args.productoId) : null;
         const prodNombre = String(args.producto_nombre ?? "");
-        const prod = buscarMejorProductoEnCatalogo(prodNombre, catalogo);
+        const prod = buscarMejorProductoEnCatalogo(
+          prodNombre,
+          catalogo,
+          catalogoPorId,
+          prodId
+        );
 
         if (!prod) {
-          mensajeFinalVoz = `No encontré "${prodNombre}" en el catálogo de tu tienda.`;
+          mensajeFinalVoz = `No encontré ${prodNombre} registrado en tu tienda.`;
           resumenOperacion = {
             tipo: "CONSULTA_STOCK",
-            titulo: "Producto no encontrado",
+            titulo: "Producto no registrado",
             detalle: mensajeFinalVoz,
           };
         } else {
@@ -1583,6 +1874,13 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
             0
           );
 
+          const unidadTxt =
+            prod.unidadMedida === "KILO"
+              ? "kilos"
+              : prod.unidadMedida === "LITRO"
+                ? "litros"
+                : "unidades";
+
           const detalleLotes = lotesProd.map((l) => ({
             unidades: l.stockActual,
             precioVenta: Number(l.precioVenta),
@@ -1593,18 +1891,18 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
 
           mensajeFinalVoz =
             totalUnidades > 0
-              ? `Tienes ${totalUnidades} unidades disponibles de ${prod.nombreProducto} a ${detalleLotes[0].precioVenta.toFixed(2)} bolivianos.`
-              : `No tienes stock disponible de ${prod.nombreProducto} en este momento.`;
+              ? `Tienes ${totalUnidades} ${unidadTxt} de ${prod.nombreProducto}, a ${detalleLotes[0].precioVenta.toFixed(2)} bolivianos.`
+              : `Te quedaste sin stock de ${prod.nombreProducto}. ¿Quieres que registremos un nuevo lote?`;
 
           resumenOperacion = {
             tipo: "CONSULTA_STOCK",
-            titulo: `${prod.nombreProducto}: ${totalUnidades} u.`,
+            titulo: `${prod.nombreProducto}: ${totalUnidades} ${unidadTxt}`,
             detalle:
               detalleLotes.length > 0
                 ? detalleLotes
-                    .map((d) => `${d.unidades} u. (vence ${d.vence})`)
+                    .map((d) => `${d.unidades} (vence ${d.vence})`)
                     .join(" · ")
-                : "Agotado actualmente",
+                : "Agotado en inventario",
           };
         }
       }
@@ -1648,12 +1946,16 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
             : "",
         }));
 
-        mensajeFinalVoz =
-          lista.length === 0
-            ? `No tienes productos por vencer en los próximos ${diasLimite} días.`
-            : `Tienes ${lista.length} lotes por vencer en los próximos ${diasLimite} días: ${lista
-                .map((x) => `${x.unidades} de ${x.producto} el ${x.vence}`)
-                .join(", ")}.`;
+        if (lista.length === 0) {
+          mensajeFinalVoz = `Todo tranquilo, no tienes productos por vencer en los próximos ${diasLimite} días.`;
+        } else if (lista.length <= 2) {
+          mensajeFinalVoz = `Atención: tienes ${lista
+            .map((x) => `${x.unidades} de ${x.producto} que vencen el ${x.vence}`)
+            .join(" y ")}.`;
+        } else {
+          const primero = lista[0];
+          mensajeFinalVoz = `Tienes ${lista.length} lotes próximos a vencer; el más urgente son ${primero.unidades} de ${primero.producto} el ${primero.vence}.`;
+        }
 
         resumenOperacion = {
           tipo: "CONSULTA_FEFO",
@@ -1663,15 +1965,18 @@ REGLAS CRÍTICAS DE INVOCACIÓN DE FUNCIONES:
               ? lista
                   .map((x) => `${x.producto}: ${x.unidades} u. (${x.vence})`)
                   .join(" · ")
-              : "Inventario sin vencimientos críticos cercanos",
+              : "Inventario sin vencimientos cercanos",
         };
       }
     }
+
+    const terminaEnPregunta = mensajeFinalVoz.trim().endsWith("?");
 
     return NextResponse.json({
       ok: true,
       estado: "EJECUTADO",
       motor: motorUtilizado,
+      esperaRespuestaUsuario: terminaEnPregunta,
       mensajeVoz: mensajeFinalVoz,
       operacion: resumenOperacion,
       undoToken: ultimoUndoToken,
