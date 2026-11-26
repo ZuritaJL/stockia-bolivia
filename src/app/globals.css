@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+:root {
+  --background: #F8FAFC;
+  --foreground: #0F172A;
+
+  /* Identidad Visual StockIA Bolivia */
+  --brand-emerald: #10563E;
+  --brand-emerald-dark: #0B3D2C;
+  --brand-emerald-light: #167354;
+  --brand-emerald-tint: #E6F2EE;
+
+  --brand-amber: #D97706;
+  --brand-amber-dark: #B45309;
+  --brand-amber-tint: #FEF3C7;
+
+  --surface-card: #FFFFFF;
+  --border-subtle: #E2E8F0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-brand-primary: var(--brand-emerald);
+  --color-brand-primary-dark: var(--brand-emerald-dark);
+  --color-brand-primary-light: var(--brand-emerald-light);
+  --color-brand-primary-tint: var(--brand-emerald-tint);
+  --color-brand-amber: var(--brand-amber);
+  --color-brand-amber-dark: var(--brand-amber-dark);
+  --color-brand-amber-tint: var(--brand-amber-tint);
+  --color-surface-card: var(--surface-card);
+  --color-border-subtle: var(--border-subtle);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}

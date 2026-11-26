@@ -1,0 +1,162 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RolUsuario {
+  COMERCIANTE
+  DISTRIBUIDORA_B2B
+  ADMIN
+}
+
+enum PlanSuscripcion {
+  BASICO_GRATIS
+  VOZ_PRO
+}
+
+enum TipoComercio {
+  ABARROTES
+  MICROMERCADO
+  FARMACIA
+  FERRETERIA
+}
+
+enum Ciudad {
+  LA_PAZ
+  EL_ALTO
+}
+
+enum UnidadMedida {
+  UNIDAD
+  PAQUETE
+  CAJA
+  LITRO
+  KILO
+}
+
+enum EstadoLote {
+  ACTIVO
+  POR_VENCER
+  VENCIDO
+  AGOTADO
+}
+
+enum MetodoRegistro {
+  VOZ
+  ESCANER
+  MANUAL
+}
+
+model Usuario {
+  id             String          @id @default(cuid())
+  nombre         String
+  email          String          @unique
+  passwordHash   String
+  rol            RolUsuario      @default(COMERCIANTE)
+  plan           PlanSuscripcion @default(BASICO_GRATIS)
+  comandosVozHoy Int             @default(0)
+  fechaResetVoz  DateTime        @default(now())
+  createdAt      DateTime        @default(now())
+
+  comercio Comercio?
+
+  @@index([rol])
+}
+
+model Comercio {
+  id            String       @id @default(cuid())
+  usuarioId     String       @unique
+  nombreTienda  String
+  tipoComercio  TipoComercio
+  ciudad        Ciudad
+  macrodistrito String
+  latitud       Float?
+  longitud      Float?
+
+  usuario Usuario          @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  lotes   InventarioLote[]
+  ventas  Venta[]
+
+  @@index([ciudad, macrodistrito])
+  @@index([tipoComercio])
+}
+
+model CatalogoCurado {
+  id             String       @id @default(cuid())
+  codigoBarras   String       @unique
+  nombreProducto String
+  marca          String
+  categoria      String
+  unidadMedida   UnidadMedida
+  imagenUrl      String?
+
+  lotes         InventarioLote[]
+  detallesVenta DetalleVenta[]
+
+  @@index([categoria])
+  @@index([marca])
+  @@index([nombreProducto])
+}
+
+model InventarioLote {
+  id               String     @id @default(cuid())
+  comercioId       String
+  productoId       String
+  stockActual      Int
+  precioCompra     Decimal    @db.Decimal(10, 2)
+  precioVenta      Decimal    @db.Decimal(10, 2)
+  fechaVencimiento DateTime?
+  fechaIngreso     DateTime   @default(now())
+  estado           EstadoLote @default(ACTIVO)
+
+  comercio      Comercio       @relation(fields: [comercioId], references: [id], onDelete: Cascade)
+  producto      CatalogoCurado @relation(fields: [productoId], references: [id], onDelete: Restrict)
+  detallesVenta DetalleVenta[]
+
+  @@index([comercioId, estado])
+  @@index([comercioId, productoId, fechaVencimiento])
+  @@index([comercioId, fechaVencimiento])
+  @@index([productoId, estado])
+}
+
+model Venta {
+  id                  String         @id @default(cuid())
+  comercioId          String
+  fechaHora           DateTime       @default(now())
+  totalBs             Decimal        @db.Decimal(10, 2)
+  metodoRegistro      MetodoRegistro
+  sincronizadoOffline Boolean        @default(false)
+
+  comercio Comercio       @relation(fields: [comercioId], references: [id], onDelete: Cascade)
+  detalles DetalleVenta[]
+
+  @@index([comercioId, fechaHora(sort: Desc)])
+  @@index([fechaHora])
+  @@index([metodoRegistro])
+}
+
+model DetalleVenta {
+  id             String  @id @default(cuid())
+  ventaId        String
+  loteId         String
+  productoId     String
+  cantidad       Int
+  precioUnitario Decimal @db.Decimal(10, 2)
+  subtotal       Decimal @db.Decimal(10, 2)
+
+  venta    Venta          @relation(fields: [ventaId], references: [id], onDelete: Cascade)
+  lote     InventarioLote @relation(fields: [loteId], references: [id], onDelete: Restrict)
+  producto CatalogoCurado @relation(fields: [productoId], references: [id], onDelete: Restrict)
+
+  @@index([ventaId])
+  @@index([productoId])
+  @@index([loteId])
+}

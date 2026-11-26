@@ -1,0 +1,17 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="112" fill="#10563E"/>
+  <rect x="24" y="24" width="464" height="464" rx="92" stroke="#187A58" stroke-width="8"/>
+  <!-- Caja isométrica StockIA -->
+  <path d="M224 96L368 178L224 260L80 178L224 96Z" fill="#22956E"/>
+  <path d="M80 178L224 260V422L80 340V178Z" fill="#156C4E"/>
+  <path d="M368 178L224 260V422L368 340V178Z" fill="#0B3D2C"/>
+  <!-- Pliegue superior de empaque -->
+  <path d="M152 137L296 219V276L266 293V236L122 154L152 137Z" fill="#F8FAFC" fill-opacity="0.28"/>
+  <!-- Flecha ascendente de protección de ganancias -->
+  <path d="M144 316L208 252L252 288L338 192" stroke="#F8FAFC" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M280 192H338V250" stroke="#F8FAFC" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Ondas de voz en Ámbar Vibrante (#D97706) -->
+  <circle cx="378" cy="252" r="18" fill="#D97706"/>
+  <path d="M406 202C430 228 430 276 406 302" stroke="#D97706" stroke-width="26" stroke-linecap="round"/>
+  <path d="M442 166C480 212 480 292 442 338" stroke="#D97706" stroke-width="26" stroke-linecap="round"/>
+</svg>
