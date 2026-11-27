@@ -2,12 +2,13 @@
 
 import React from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   AlertTriangle,
   BarChart3,
   Crown,
+  LogOut,
   MapPinned,
   Package,
   ScanBarcode,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import { NavbarBrand } from "@/components/NavbarBrand";
 import { RoleSelector } from "@/components/RoleSelector";
+import { WelcomeLoginScreen } from "@/components/auth/WelcomeLoginScreen";
 import { VoiceAssistantButton } from "@/components/mostrador/VoiceAssistantButton";
 import { VoiceQuotaPill } from "@/components/mostrador/VoiceQuotaPill";
 import { useRole } from "@/context/RoleContext";
@@ -57,11 +59,9 @@ const NAV_B2B = [
 ];
 
 export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
-  const { rol } = useRole();
+  const { sesion, hidratado, rol, cerrarSesion } = useRole();
   const pathname = usePathname();
-  const esRutaB2B =
-    pathname === "/dashboard" || pathname.startsWith("/b2b");
-  const rolEfectivo = esRutaB2B ? "DISTRIBUIDORA_B2B" : rol;
+  const router = useRouter();
 
   const alertasFefoCount =
     useLiveQuery(async () => {
@@ -73,6 +73,29 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
       }).length;
     }, []) ?? 2;
 
+  const manejarCerrarSesion = () => {
+    cerrarSesion();
+    router.push("/");
+  };
+
+  // Estado inicial de hidratación sin parpadeo
+  if (!hidratado) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC] text-[#064e3b] font-bold text-sm">
+        Cargando StockIA Bolivia...
+      </div>
+    );
+  }
+
+  // Mientras no exista una sesión iniciada, mostrar únicamente la pantalla de bienvenida y login
+  if (!sesion) {
+    return <WelcomeLoginScreen />;
+  }
+
+  const esRutaB2B =
+    pathname === "/dashboard" || pathname.startsWith("/b2b");
+  const rolEfectivo = esRutaB2B ? "DISTRIBUIDORA_B2B" : rol;
+
   const navComercianteDer = [
     {
       href: "/alertas",
@@ -82,7 +105,7 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
     },
     {
       href: "/plan",
-      label: "Mi Plan",
+      label: "Mi Perfil",
       icon: Crown,
       badge: 0,
     },
@@ -100,7 +123,7 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
 
             <div className="space-y-1.5">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-200/80">
-                Modo de Demostración MVP
+                Cambio Rápido de Vista
               </span>
               <RoleSelector variant="sidebar" />
             </div>
@@ -112,11 +135,11 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
                 </span>
                 <ShieldCheck className="h-4 w-4 text-emerald-300" />
               </div>
-              <p className="mt-1 text-sm font-bold text-white">
-                Distribuidora Andina S.R.L.
+              <p className="mt-1 text-sm font-bold text-white truncate">
+                {sesion.nombreEntidad}
               </p>
-              <p className="text-xs text-emerald-100/75">
-                Cobertura: La Paz y El Alto
+              <p className="text-xs text-emerald-100/75 truncate">
+                {sesion.ubicacion}
               </p>
             </div>
 
@@ -163,10 +186,21 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
             </nav>
           </div>
 
-          <div className="hidden lg:block p-5 border-t border-white/10 text-xs text-emerald-100/85 leading-relaxed">
-            Cumplimiento de Privacidad StockIA: Datos 100% agregados y
-            anonimizados por macrodistrito conforme a la política de protección
-            al comerciante minorista.
+          <div className="p-5 border-t border-white/10 space-y-3">
+            <button
+              type="button"
+              onClick={manejarCerrarSesion}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-white/10 px-3.5 py-2 text-xs font-bold text-white hover:bg-white/20 transition cursor-pointer"
+            >
+              <LogOut className="h-3.5 w-3.5 text-amber-300" />
+              Cerrar Sesión
+            </button>
+
+            <p className="hidden lg:block text-[11px] text-emerald-100/80 leading-relaxed">
+              Cumplimiento de Privacidad StockIA: Datos 100% agregados y
+              anonimizados por macrodistrito conforme a la política de
+              protección al comerciante minorista.
+            </p>
           </div>
         </aside>
 
@@ -177,14 +211,23 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
                 Inteligencia Comercial Zonal · La Paz &amp; El Alto
               </h1>
               <p className="text-xs text-slate-500">
-                Métricas agregadas en tiempo real de comercios minoristas afiliados
+                Sesión activa: <strong>{sesion.nombreUsuario}</strong> ({sesion.email})
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-primary-tint px-3 py-1 text-xs font-semibold text-brand-primary">
                 <span className="h-2 w-2 rounded-full bg-emerald-600" />
                 Sincronización Cloud Activa
               </span>
+              <button
+                type="button"
+                onClick={manejarCerrarSesion}
+                title="Cerrar sesión"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 hover:text-red-600 cursor-pointer"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                Salir
+              </button>
             </div>
           </header>
 
@@ -205,18 +248,29 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
         <div className="max-w-xl mx-auto px-4 py-2.5 flex flex-col gap-2.5">
           <div className="flex items-center justify-between gap-2">
             <NavbarBrand compact />
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-primary-tint px-2.5 py-1 text-[11px] font-semibold text-brand-primary">
-              <Wifi className="h-3 w-3" />
-              Offline-First
-            </span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-brand-primary-tint px-2.5 py-1 text-[11px] font-semibold text-brand-primary">
+                <Wifi className="h-3 w-3" />
+                Offline-First
+              </span>
+              <button
+                type="button"
+                onClick={manejarCerrarSesion}
+                title="Cerrar sesión y volver al inicio"
+                className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition cursor-pointer"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span>Salir</span>
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
-            <div className="text-xs text-slate-600">
+            <div className="text-xs text-slate-600 truncate max-w-[58%]">
               <span className="font-bold text-slate-800">
-                Tienda Doña Martha
+                {sesion.nombreEntidad}
               </span>{" "}
-              · Miraflores, La Paz
+              · {sesion.ubicacion}
             </div>
             <RoleSelector variant="header" />
           </div>
@@ -231,7 +285,6 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
         aria-label="Navegación rápida de comerciante"
         className="fixed bottom-0 inset-x-0 z-40 bg-white border-t border-slate-200 shadow-[0_-4px_20px_rgba(15,23,42,0.06)]"
       >
-        {/* Píldora discreta de cuota diaria flotando junto al micrófono central */}
         <div className="pointer-events-none absolute -top-9 inset-x-0 flex justify-center">
           <div className="pointer-events-auto">
             <VoiceQuotaPill compact />
@@ -264,7 +317,6 @@ export function AdaptiveAppShell({ children }: { children: React.ReactNode }) {
             );
           })}
 
-          {/* Botón Central Flotante Operativo de Voz (Gemini Function Calling) */}
           <VoiceAssistantButton />
 
           {navComercianteDer.map((item) => {

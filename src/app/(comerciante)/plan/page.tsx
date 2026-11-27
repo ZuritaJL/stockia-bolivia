@@ -1,22 +1,26 @@
 "use client";
 
 import React, { useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Check,
   CheckCircle2,
   Crown,
   Loader2,
+  LogOut,
   Mic,
   QrCode,
   RotateCcw,
   ShieldCheck,
   Sparkles,
+  Store,
   X,
 } from "lucide-react";
 import {
   actualizarCuotaVozGlobal,
   useVoiceQuota,
 } from "@/lib/voice-quota-store";
+import { useRole } from "@/context/RoleContext";
 
 /**
  * Matriz determinista 21x21 estilo QR Simple Bolivia para demostración visual limpia.
@@ -48,6 +52,8 @@ const QR_MATRIX_21: number[][] = Array.from({ length: 21 }, (_, r) =>
 
 export default function SuscripcionPlanPage() {
   const cuota = useVoiceQuota();
+  const { sesion, cerrarSesion } = useRole();
+  const router = useRouter();
 
   const [modalQrAbierto, setModalQrAbierto] = useState(false);
   const [procesandoPago, setProcesandoPago] = useState(false);
@@ -117,6 +123,37 @@ export default function SuscripcionPlanPage() {
 
   return (
     <div className="space-y-4">
+      {/* Ficha de Perfil de Usuario Activo + Cerrar Sesión */}
+      {sesion && (
+        <section className="rounded-2xl border border-border-subtle bg-white p-4 shadow-2xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#10563E] text-white">
+              <Store className="h-5 w-5 text-amber-300" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-extrabold text-slate-900 truncate">
+                {sesion.nombreEntidad}
+              </p>
+              <p className="text-xs text-slate-500 truncate">
+                {sesion.nombreUsuario} · {sesion.email}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              cerrarSesion();
+              router.push("/");
+            }}
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-extrabold text-red-700 hover:bg-red-100 cursor-pointer"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Cerrar Sesión
+          </button>
+        </section>
+      )}
+
       {/* Encabezado */}
       <div>
         <h1 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
