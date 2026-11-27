@@ -68,6 +68,9 @@ export default function MostradorOfflineFirstPage() {
   const [modalIngresoAbierto, setModalIngresoAbierto] = useState(false);
   const [productoPreseleccionadoLote, setProductoPreseleccionadoLote] =
     useState<string | null>(null);
+  const [codigoNuevoEscaneado, setCodigoNuevoEscaneado] = useState<
+    string | null
+  >(null);
 
   const [cobrando, setCobrando] = useState(false);
   const [avisoExito, setAvisoExito] = useState<string | null>(null);
@@ -237,13 +240,15 @@ export default function MostradorOfflineFirstPage() {
 
   const manejarCodigoEscaneado = (codigoBarras: string) => {
     setModalEscanerAbierto(false);
-    const encontrado = catalogo.find((c) => c.codigoBarras === codigoBarras);
+    const limpio = codigoBarras.trim();
+    const encontrado = catalogo.find((c) => c.codigoBarras === limpio);
 
     if (!encontrado) {
-      setBusqueda(codigoBarras);
-      setAvisoError(
-        `Código ${codigoBarras} no encontrado en el catálogo curado.`
-      );
+      // Abrir automáticamente el formulario "Registrar Nuevo Producto" con codigoBarras prellenado
+      setAvisoError(null);
+      setProductoPreseleccionadoLote(null);
+      setCodigoNuevoEscaneado(limpio);
+      setModalIngresoAbierto(true);
       return;
     }
 
@@ -452,6 +457,7 @@ export default function MostradorOfflineFirstPage() {
           type="button"
           onClick={() => {
             setProductoPreseleccionadoLote(null);
+            setCodigoNuevoEscaneado(null);
             setModalIngresoAbierto(true);
           }}
           className="flex items-center justify-center gap-2.5 rounded-2xl border-2 border-brand-amber bg-white px-4 py-3.5 text-left shadow-2xs transition active:scale-[0.98] hover:bg-brand-amber-tint/40 cursor-pointer"
@@ -570,10 +576,48 @@ export default function MostradorOfflineFirstPage() {
             type="search"
             value={busqueda}
             onChange={(e) => setBusqueda(e.target.value)}
+            onKeyDown={(e) => {
+              if (
+                e.key === "Enter" &&
+                resultadosFiltrados.length === 0 &&
+                busqueda.trim()
+              ) {
+                e.preventDefault();
+                const txt = busqueda.trim();
+                setProductoPreseleccionadoLote(null);
+                setCodigoNuevoEscaneado(/^\d{6,14}$/.test(txt) ? txt : null);
+                setModalIngresoAbierto(true);
+              }
+            }}
             placeholder="Buscar por nombre, marca o código 777..."
             className="w-full rounded-2xl border border-slate-300 bg-white pl-10 pr-4 py-3 text-sm font-medium text-slate-900 shadow-2xs focus:border-brand-primary focus:outline-none"
           />
         </div>
+
+        {resultadosFiltrados.length === 0 && busqueda.trim() && (
+          <div className="rounded-2xl border-2 border-brand-amber/40 bg-brand-amber-tint/50 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-extrabold text-slate-900">
+                Código o producto &ldquo;{busqueda.trim()}&rdquo; no encontrado
+              </p>
+              <p className="text-xs text-slate-600">
+                Regístralo en el catálogo y crea su primer lote en un solo paso.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const txt = busqueda.trim();
+                setProductoPreseleccionadoLote(null);
+                setCodigoNuevoEscaneado(/^\d{6,14}$/.test(txt) ? txt : null);
+                setModalIngresoAbierto(true);
+              }}
+              className="shrink-0 rounded-xl bg-brand-amber px-4 py-2.5 text-xs font-extrabold text-white shadow-xs hover:bg-brand-amber-dark cursor-pointer"
+            >
+              + Registrar Nuevo Producto
+            </button>
+          </div>
+        )}
 
         {hidratandoInicial && catalogo.length === 0 ? (
           <div className="rounded-2xl bg-white border border-border-subtle p-6 text-center text-xs font-semibold text-slate-500">
@@ -668,13 +712,20 @@ export default function MostradorOfflineFirstPage() {
       />
 
       <IngresoLoteModal
-        key={productoPreseleccionadoLote ?? "general"}
+        key={`${productoPreseleccionadoLote ?? "general"}-${codigoNuevoEscaneado ?? "existing"}`}
         abierto={modalIngresoAbierto}
         catalogo={catalogo}
         lotesActuales={lotes}
         productoInicialId={productoPreseleccionadoLote}
-        onClose={() => setModalIngresoAbierto(false)}
-        onSuccess={(mensaje) => setAvisoExito(mensaje)}
+        codigoBarrasNuevoInicial={codigoNuevoEscaneado}
+        onClose={() => {
+          setModalIngresoAbierto(false);
+          setCodigoNuevoEscaneado(null);
+        }}
+        onSuccess={(mensaje) => {
+          setBusqueda("");
+          setAvisoExito(mensaje);
+        }}
       />
     </div>
   );

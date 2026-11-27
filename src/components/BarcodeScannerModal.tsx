@@ -16,7 +16,7 @@ interface BarcodeScannerModalProps {
 const CODIGOS_DEMO_RAPIDOS = [
   { codigo: "7771609000124", etiqueta: "Coca-Cola 2L" },
   { codigo: "7771207003051", etiqueta: "Yogurt Pil (FEFO)" },
-  { codigo: "7771806001047", etiqueta: "Café Copacabana" },
+  { codigo: "7779900112233", etiqueta: "EAN-13 Nuevo (Alta)" },
 ];
 
 export function BarcodeScannerModal({

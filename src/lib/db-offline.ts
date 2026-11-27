@@ -50,6 +50,7 @@ export interface VentaLocal {
 
 export interface PayloadIngresoLoteSync {
   lote: LoteLocal;
+  nuevoProducto?: CatalogoLocal;
 }
 
 export interface PayloadVentaSync {
@@ -190,6 +191,95 @@ export interface NuevoLoteInput {
   precioCompra: number;
   precioVenta: number;
   fechaVencimiento: string | null;
+}
+
+export interface NuevoProductoConLoteInput {
+  codigoBarras: string;
+  nombreProducto: string;
+  marca: string;
+  categoria: string;
+  unidadMedida: UnidadMedidaLocal;
+  stockActual: number;
+  precioCompra: number;
+  precioVenta: number;
+  fechaVencimiento: string | null;
+}
+
+/**
+ * Crea en un solo paso atómico un nuevo registro en `catalogo` (CatalogoCurado)
+ * y su primer lote en `lotes` (InventarioLote), encolando ambos para `/api/sync`.
+ */
+export async function registrarNuevoProductoYLoteLocal(
+  input: NuevoProductoConLoteInput
+): Promise<{ producto: CatalogoLocal; lote: LoteLocal }> {
+  const ahoraIso = new Date().toISOString();
+  const comercioId = await obtenerComercioIdLocal();
+  const codigoLimpio = input.codigoBarras.trim();
+
+  if (!codigoLimpio) {
+    throw new Error("El código de barras es obligatorio.");
+  }
+
+  return dbOffline.transaction(
+    "rw",
+    dbOffline.catalogo,
+    dbOffline.lotes,
+    dbOffline.colaSincronizacion,
+    async () => {
+      const existentePorCodigo = await dbOffline.catalogo
+        .where("codigoBarras")
+        .equals(codigoLimpio)
+        .first();
+
+      const productoFinal: CatalogoLocal = existentePorCodigo ?? {
+        id: generarIdLocal("prod"),
+        codigoBarras: codigoLimpio,
+        nombreProducto: input.nombreProducto.trim(),
+        marca: input.marca.trim() || "Genérico",
+        categoria: input.categoria.trim() || "Abarrotes",
+        unidadMedida: input.unidadMedida,
+        imagenUrl: null,
+      };
+
+      if (!existentePorCodigo) {
+        await dbOffline.catalogo.put(productoFinal);
+      }
+
+      const estado = calcularEstadoLote(
+        input.stockActual,
+        input.fechaVencimiento
+      );
+
+      const primerLote: LoteLocal = {
+        id: generarIdLocal("lote"),
+        comercioId,
+        productoId: productoFinal.id,
+        stockActual: input.stockActual,
+        precioCompra: Number(input.precioCompra.toFixed(2)),
+        precioVenta: Number(input.precioVenta.toFixed(2)),
+        fechaVencimiento: input.fechaVencimiento,
+        fechaIngreso: ahoraIso,
+        estado,
+        sincronizado: false,
+      };
+
+      await dbOffline.lotes.put(primerLote);
+
+      await dbOffline.colaSincronizacion.add({
+        operacionId: generarIdLocal("op_nuevoprod"),
+        tipo: "INGRESO_LOTE",
+        payload: {
+          lote: primerLote,
+          ...(existentePorCodigo ? {} : { nuevoProducto: productoFinal }),
+        },
+        estado: "PENDIENTE",
+        intentos: 0,
+        creadoEn: ahoraIso,
+      });
+
+      return { producto: productoFinal, lote: primerLote };
+    }
+  );
 }
 
 export async function registrarIngresoLoteLocal(
@@ -439,12 +529,14 @@ export async function sincronizarInventarioLocalDesdeNube(deltasInmediatos?: {
       dbOffline.colaSincronizacion,
       dbOffline.meta,
       async () => {
+        const pendientes = await dbOffline.colaSincronizacion.count();
         if (data.catalogo) {
-          await dbOffline.catalogo.clear();
+          if (pendientes === 0) {
+            await dbOffline.catalogo.clear();
+          }
           await dbOffline.catalogo.bulkPut(data.catalogo);
         }
 
-        const pendientes = await dbOffline.colaSincronizacion.count();
         if (data.lotes) {
           if (pendientes === 0) {
             await dbOffline.lotes.clear();

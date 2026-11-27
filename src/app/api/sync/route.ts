@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import prisma from "@/lib/prisma";
-import { EstadoLote, MetodoRegistro, Prisma } from "@/generated/prisma/client";
+import {
+  EstadoLote,
+  MetodoRegistro,
+  Prisma,
+  UnidadMedida,
+} from "@/generated/prisma/client";
 import type { OperacionColaSync } from "@/lib/db-offline";
 
 function calcularEstadoServidor(
@@ -196,7 +201,41 @@ export async function POST(request: Request) {
     for (const op of operaciones) {
       await prisma.$transaction(async (tx) => {
         if (op.tipo === "INGRESO_LOTE") {
-          const { lote } = op.payload;
+          const { lote, nuevoProducto } = op.payload;
+          let productoIdReal = lote.productoId;
+
+          // Si el lote proviene de un código EAN-13 nuevo escaneado en mostrador/inventario,
+          // registrar primero el producto en CatalogoCurado de forma idempotente
+          if (nuevoProducto) {
+            const yaExisteCodigo = await tx.catalogoCurado.findUnique({
+              where: { codigoBarras: nuevoProducto.codigoBarras },
+            });
+
+            if (yaExisteCodigo) {
+              productoIdReal = yaExisteCodigo.id;
+            } else {
+              const creado = await tx.catalogoCurado.upsert({
+                where: { id: nuevoProducto.id },
+                update: {
+                  nombreProducto: nuevoProducto.nombreProducto,
+                  marca: nuevoProducto.marca,
+                  categoria: nuevoProducto.categoria,
+                  unidadMedida: nuevoProducto.unidadMedida as UnidadMedida,
+                },
+                create: {
+                  id: nuevoProducto.id,
+                  codigoBarras: nuevoProducto.codigoBarras,
+                  nombreProducto: nuevoProducto.nombreProducto,
+                  marca: nuevoProducto.marca,
+                  categoria: nuevoProducto.categoria,
+                  unidadMedida: nuevoProducto.unidadMedida as UnidadMedida,
+                  imagenUrl: nuevoProducto.imagenUrl ?? null,
+                },
+              });
+              productoIdReal = creado.id;
+            }
+          }
+
           const comercioIdReal =
             lote.comercioId === "comercio-demo-martha"
               ? comercioFallback.id
@@ -222,7 +261,7 @@ export async function POST(request: Request) {
             create: {
               id: lote.id,
               comercioId: comercioIdReal,
-              productoId: lote.productoId,
+              productoId: productoIdReal,
               stockActual: lote.stockActual,
               precioCompra: new Prisma.Decimal(lote.precioCompra.toFixed(2)),
               precioVenta: new Prisma.Decimal(lote.precioVenta.toFixed(2)),
