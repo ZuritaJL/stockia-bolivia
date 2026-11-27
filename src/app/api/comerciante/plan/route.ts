@@ -1,6 +1,6 @@
 import { NextResponse, connection } from "next/server";
 import prisma from "@/lib/prisma";
-import { PlanSuscripcion } from "@/generated/prisma/client";
+import { PlanSuscripcion } from "@prisma/client";
 
 const LIMITE_GRATIS_DIARIO = 15;
 

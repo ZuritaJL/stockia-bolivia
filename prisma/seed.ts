@@ -8,7 +8,7 @@ import {
   RolUsuario,
   TipoComercio,
   UnidadMedida,
-} from "../src/generated/prisma/client";
+} from "@prisma/client";
 
 const prisma = new PrismaClient();
 

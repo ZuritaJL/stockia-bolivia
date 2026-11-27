@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { EstadoLote, PlanSuscripcion } from "@/generated/prisma/client";
+import { EstadoLote, PlanSuscripcion } from "@prisma/client";
 import { consumirOperacionDeshacer } from "@/lib/voice-undo-store";
 
 const LIMITE_GRATIS_DIARIO = 15;

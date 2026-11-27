@@ -8,7 +8,7 @@ import {
   Prisma,
   RolUsuario,
   TipoComercio,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 
 export type NivelUrgenciaZonal = "ALTO" | "MEDIO" | "BAJO";
 

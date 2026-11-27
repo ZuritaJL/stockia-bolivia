@@ -9,7 +9,7 @@ import {
   UnidadMedida,
   type CatalogoCurado,
   type InventarioLote,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 import { guardarOperacionDeshacer } from "@/lib/voice-undo-store";
 
 const MODELOS_CASCADA = [

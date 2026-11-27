@@ -6,7 +6,7 @@ import {
   MetodoRegistro,
   Prisma,
   UnidadMedida,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 import type { OperacionColaSync } from "@/lib/db-offline";
 
 function calcularEstadoServidor(

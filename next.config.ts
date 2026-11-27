@@ -16,8 +16,12 @@ const withPWA = withPWAInit({
 const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
+  serverExternalPackages: ["@prisma/client", "prisma"],
   outputFileTracingIncludes: {
-    "/api/**/*": ["./src/generated/prisma/**/*"],
+    "/api/**/*": [
+      "./node_modules/.prisma/client/**/*",
+      "./node_modules/@prisma/client/**/*",
+    ],
   },
   turbopack: {
     rules: {

@@ -1,6 +1,6 @@
 import { NextResponse, connection } from "next/server";
 import prisma from "@/lib/prisma";
-import { EstadoLote, MetodoRegistro, Prisma } from "@/generated/prisma/client";
+import { EstadoLote, MetodoRegistro, Prisma } from "@prisma/client";
 import { analizarInteligenciaComercio } from "@/lib/fefo-engine";
 
 async function resolverComercioActivo(comercioIdParam?: string | null) {

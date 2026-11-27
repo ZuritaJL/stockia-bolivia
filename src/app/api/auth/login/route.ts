@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { RolUsuario } from "@/generated/prisma/client";
+import { RolUsuario } from "@prisma/client";
 
 const CLAVES_DEMO_PERMITIDAS = new Set([
   "stockia2026",
